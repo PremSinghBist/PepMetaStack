@@ -1,0 +1,8 @@
+Vanial GMProt Performance on Escheleria coli:
+-------------------------
+  RMSE: 0.4892
+  R2: 0.5114
+  Pearson: 0.7256
+  Kendall: 0.5065
+
+  ---------------------

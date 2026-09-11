@@ -1,0 +1,6 @@
+Compatible version
+0--
+TensorFlow: 2.13.1
+PyTorch: 2.1.2+cu121 CUDA: Tru
+transformers library
+modlamp 
