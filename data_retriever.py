@@ -8,7 +8,7 @@ import position_encoding_extractor as PEE
 
 
 def load_features(
-    fused_embedding_file="",
+    fused_embeddings=None,
     blosum_csv="",
     physio_csv="",
     sinusoidal_csv="",
@@ -62,14 +62,7 @@ def load_features(
         .to_dict("index")
     )
 
-    # ==========================================================
-    # Load fused/GMProt embeddings
-    # ==========================================================
 
-    fused_embeddings = np.load(
-        fused_embedding_file,
-        allow_pickle=True,
-    ).item()
 
     if not isinstance(fused_embeddings, dict):
         raise ValueError(

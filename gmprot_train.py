@@ -359,7 +359,7 @@ class GMProt(keras.Model):
     # Extract GMProt fusion embeddings for all sequences
     # ======================================================================
 
-    def compute_save_fusion_embeddings(self, data_splits, output_path=None):
+    def compute_fusion_embeddings(self, data_splits, output_path=None):
         """
         Extract 128-D GMProt fusion embeddings for all sequences
         in train, validation and test splits.
@@ -444,24 +444,7 @@ class GMProt(keras.Model):
                     f"Processed {i}/{total}"
                 )
 
-        # ------------------------------------------------------------------
-        # Save embeddings
-        # ------------------------------------------------------------------
-        output_path = Path(output_path)
-
-        if output_path.suffix.lower() != ".npy":
-            output_path = output_path.with_suffix(".npy")
-
-        output_path.parent.mkdir(
-            parents=True,
-            exist_ok=True
-        )
-
-        np.save(
-            output_path,
-            embedding_dict,
-            allow_pickle=True
-        )
+        
 
         # ------------------------------------------------------------------
         # Summary
@@ -484,6 +467,8 @@ class GMProt(keras.Model):
         print("=" * 60)
 
         return embedding_dict
+
+    
 
     def call(self, inputs, training=False):
         seq_emb = inputs["seq_emb"]
@@ -616,7 +601,7 @@ def evaluate_saved_model(
 
     # 1. Load data and extract test split
     print("Loading dataset features for evaluation...")
-    data_splits = data_util.load_features(
+    data_splits = data_util.load_gmprot_features(
         normalize_features=True,
         embedding_file=embedding_file,
         blosum_csv=blosum_csv,
@@ -659,11 +644,11 @@ def evaluate_saved_model(
 
     return test_metrics
 
-def main(model_name="GMProt_Experiment", fold_index=None):
+def main(model_name=None, fold_index=None):
     set_global_seed(cfg.seed)
 
 
-    data_splits = data_util.load_features(
+    data_splits = data_util.load_gmprot_features(
         embedding_file=cfg.ecoli_prott5_embedding_file,
         blosum_csv=cfg.ecoli_blosum_csv,
         physio_csv=cfg.ecoli_physio_csv,
@@ -685,7 +670,8 @@ def main(model_name="GMProt_Experiment", fold_index=None):
     #Homology aware splitting could not perform due to insufficient data. Using original splits instead.
     #data_splits = data_util.merge_and_resplit_by_counts(data_splits, seed=cfg.seed)
     
-    model_name = f"{model_name}_{fold_index}"
+   
+    model_name = get_model_name(model_name, fold_index)
     print(f"\nStarting training run for {model_name}...")
 
     model, test_metrics = train_model(data_splits, model_name=model_name)
@@ -707,13 +693,12 @@ def main(model_name="GMProt_Experiment", fold_index=None):
     )'''
     
 
-def fused_embed_extraction():
+def fused_embed_extraction(model_path=None):
     set_global_seed(cfg.seed)
 
     print("Loading real dataset features and computing splits...")
 
-    data_splits = data_util.load_features(
-        normalize_features=True,
+    data_splits = data_util.load_gmprot_features(
         embedding_file=cfg.ecoli_prott5_embedding_file,
         blosum_csv=cfg.ecoli_blosum_csv,
         physio_csv=cfg.ecoli_physio_csv,
@@ -728,8 +713,9 @@ def fused_embed_extraction():
         f"Test: {len(data_splits['test'])}"
     )
 
-    model_name = "GMProt_Experiment_1"
-    model_path = Path(f"./model/{model_name}")
+   
+    model_path = Path(model_path)
+    print("Model Path for extracting fused embeddings: ", model_path)
 
     if not model_path.exists():
         raise FileNotFoundError(f"Model path does not exist: {model_path}")
@@ -741,10 +727,26 @@ def fused_embed_extraction():
         "SequenceCNN": SequenceCNN,
     }
     model: GMProt = keras.models.load_model(str(model_path), custom_objects=custom_objects)
+    model.trainable = False
+    
+    print("Trainable variables:", len(model.trainable_variables))
 
     # Extract fusion embeddings for all sequences
-    embedding_dict = model.compute_save_fusion_embeddings(data_splits, output_path=f"./data/gmprot_ecoli_fusion_embeddings.npy")  
+    embedding_dict = model.compute_fusion_embeddings(data_splits)  
+    
+    return embedding_dict
      
+
+def get_model_name(model_name, fold_index):
+
+    if model_name is None or fold_index not in [1, 2, 3, 4, 5]:
+        raise ValueError(
+            "Incorrect model name or fold_index. "
+            "fold_index must be one of [1, 2, 3, 4, 5]."
+        )
+
+    return f"{model_name}_{fold_index}"
+
 
    
 
@@ -757,6 +759,11 @@ if __name__ == "__main__":
         test_metrics_list.append(metrics)
         
     data_util.summarize_cv_metrics(test_metrics_list, save_csv="./results/gmprot_cv_results.csv")
+    
+    model_name = get_model_name(model_name='GMProt_Experiment', fold_index=1)
 
-    # fused_embed_extraction()
+    embedding_dict = fused_embed_extraction(model_path = f"./model/{model_name}")
+    
+    # data_util.save_fusion_embeddings(output_path="./data/gmprot_ecoli_fusion_embeddings.npy", embedding_dict=embedding_dict)
+    
     # data_util.load_fusion_embeddings(embedding_path="./data/gmprot_ecoli_fusion_embeddings.npy")

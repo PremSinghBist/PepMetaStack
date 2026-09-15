@@ -12,6 +12,29 @@ import position_encoding_extractor as PEE
 from experimental_config import ExperimentConfig
 CFG = ExperimentConfig()
 
+def save_fusion_embeddings(output_path=None, embedding_dict=None):
+        # ------------------------------------------------------------------
+        # Save embeddings
+        # ------------------------------------------------------------------
+        output_path = Path(output_path)
+
+        if output_path.suffix.lower() != ".npy":
+            output_path = output_path.with_suffix(".npy")
+
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        np.save(
+            output_path,
+            embedding_dict,
+            allow_pickle=True
+        )
+        print(
+            f"\nGMProt fusion embeddings saved to: {output_path}")
+        
+        return output_path
 
 def normalize(features, mean=None, std=None, eps=1e-8):
     """
@@ -55,7 +78,7 @@ def load_datasets_old(datasets_index=[0, 1, 2, 3, 4], dataset_path=''):
     print(f"Datasets loaded from {dataset_path}.")
     return [datasets[i] for i in datasets_index]
 
-def load_features(
+def load_gmprot_features(
     embedding_file=None,
     blosum_csv="",
     physio_csv="",
@@ -235,79 +258,79 @@ def print_features_stat(splits):
             )
     print("=" * 60)
     
-# ======================================================================
-# Load GMProt fusion embeddings
-# ======================================================================
-
-def load_fusion_embeddings(embedding_path):
+# ------------------------
+# Load embeddings
+# ------------------------
+def load_embeddings(filepath):
     """
-    Load 128-D GMProt fusion embeddings from a .npy file.
+    Load embeddings saved as:
+
+        {
+            "I L P I I G K I L S T I F G K": embedding_array,
+            ...
+        }
+
+    The keys are normalized to raw sequences:
+
+        "ILPIIGKILSTIFGK"
+    """
+    data = np.load(filepath, allow_pickle=True)
+
+    raw_embedding_dict = data["embeddings"].item()
+
+    # Normalize sequence keys by removing spaces
+    embedding_dict = {
+        sequence.replace(" ", "").strip(): embedding
+        for sequence, embedding in raw_embedding_dict.items()
+    }
+
+    print(f"Loaded {len(embedding_dict)} embeddings")
+
+    if embedding_dict:
+        first_seq = next(iter(embedding_dict))
+        first_embedding = embedding_dict[first_seq]
+
+        print(f"Example sequence: {first_seq}")
+        print(f"Embedding shape: {first_embedding.shape}")
+
+    return embedding_dict
+
+# ------------------------
+# Save embeddings
+# ------------------------
+def save_embeddings(sequences, embeddings, filepath):
+    """
+    Save embeddings as a dictionary:
+
+        {
+            "sequence": embedding_array,
+            ...
+        }
 
     Parameters
     ----------
-    embedding_path : str or Path
-        Path to the saved .npy embedding file.
-
-    Returns
-    -------
-    dict
-        Dictionary containing:
-            sequence -> 128-D NumPy embedding
+    sequences : list
+        Original protein/peptide sequences.
+    embeddings : list or np.ndarray
+        Corresponding embedding arrays.
+    filepath : str
+        Output .npz file path.
     """
+    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
 
-    embedding_path = Path(embedding_path)
+    embedding_dict = {
+        seq: embedding
+        for seq, embedding in zip(sequences, embeddings)
+    }
 
-    if not embedding_path.exists():
-        raise FileNotFoundError(
-            f"Embedding file does not exist: {embedding_path}"
-        )
+    np.savez_compressed(
+        filepath,
+        embeddings=embedding_dict
+    )
 
-    # Load dictionary
-    embedding_dict = np.load(
-        embedding_path,
-        allow_pickle=True
-    ).item()
+    print(f"Saved {len(embedding_dict)} embeddings to {filepath}")
 
-    if not isinstance(embedding_dict, dict):
-        raise ValueError(
-            "The embedding file does not contain a dictionary."
-        )
 
-    # Basic information
-    print("\n" + "=" * 60)
-    print("GMProt Fusion Embeddings")
-    print("=" * 60)
-
-    print(f"Embedding file     : {embedding_path}")
-    print(f"Number of sequences: {len(embedding_dict)}")
-
-    if embedding_dict:
-        first_sequence = next(iter(embedding_dict))
-        first_embedding = np.asarray(
-            embedding_dict[first_sequence]
-        )
-
-        print(f"Embedding dimension: {first_embedding.shape}")
-        print(f"Data type          : {first_embedding.dtype}")
-        print(f"First sequence     : {first_sequence}")
-
-        # Verify all embeddings
-        dimensions = {
-            np.asarray(embedding).shape
-            for embedding in embedding_dict.values()
-        }
-
-        if len(dimensions) == 1:
-            print(f"Embedding shapes    : {dimensions}")
-        else:
-            print(
-                f"Warning: Multiple embedding shapes found: "
-                f"{dimensions}"
-            )
-
-    print("=" * 60)
-
-    return embedding_dict
 
 def merge_and_resplit_by_counts(data_splits, seed=None):
     """

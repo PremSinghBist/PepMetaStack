@@ -4,3 +4,29 @@ TensorFlow: 2.13.1
 PyTorch: 2.1.2+cu121 CUDA: Tru
 transformers library
 modlamp 
+
+
+
+----Transformer library needs torch minimum 2.5.1----
+conda create -n torch_2_5 python=3.10 -y
+conda activate torch_2_5
+pip install --upgrade pip
+pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+pip install transformers
+pip install numpy pandas tqdm
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('CUDA available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
+python -c "import torch; from transformers import AutoModel; print('PyTorch:', torch.__version__); print('Transformers:', __import__('transformers').__version__); print('AutoModel: OK')"
+
+Embedding Models to explore:
+--------------
+ProstT5
+SaProt-650M (SaProt-1.3B )
+TM-Vec
+
+
+
+-----
+Visualization to make:
+normalized performance heatmap
+
+

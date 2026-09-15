@@ -12,7 +12,7 @@ class ExperimentConfig:
     ecoli_dataset_csv= "./data/ecoli_five_fold_dataset.csv"#"./data/ecoli_clustered_dataset_splits.csv"
 
     # Training
-    batch_size: int = 256
+    batch_size: int = 1024 #256
     epochs: int = 500
     lr: float = 3e-4
     seed: int = 42 #6, 0 , 3 , 7, 20, 35, 29, 27, 17, 42
