@@ -1,6 +1,4 @@
 import os
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
@@ -16,94 +14,246 @@ from sklearn.ensemble import (
 )
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.neural_network import MLPRegressor
-
 from xgboost import XGBRegressor
 
 from metrics import Metric
 import data_util
-import physiochem_feature_extractor 
+import physiochem_feature_extractor
 import blosum62
 import position_encoding_extractor
 
 
+# ============================================================
+# Stacking Regression Pipeline
+# ============================================================
+
 class StackingRegressionPipeline:
 
-    # ============================================================
+    """
+    Generic stacking regression pipeline for protein sequence features.
+
+    The pipeline supports:
+
+        - ProtT5
+        - Fine-tuned ProtT5
+        - ESM2
+        - Pre-computed fusion embeddings
+        - Multiple embedding sources simultaneously
+        - Physicochemical features
+        - BLOSUM62 features
+        - Sinusoidal positional features
+
+    Examples
+    --------
+    Pure ProtT5:
+
+        embedding_files = {
+            "prott5": "prott5.npz"
+        }
+
+        embedding_sources = ["prott5"]
+
+
+    Fine-tuned ProtT5:
+
+        embedding_files = {
+            "ft_prott5": "ft_prott5.npz"
+        }
+
+        embedding_sources = ["ft_prott5"]
+
+
+    ProtT5 + ESM2:
+
+        embedding_files = {
+            "prott5": "prott5.npz",
+            "esm2": "esm2.npz"
+        }
+
+        embedding_sources = [
+            "prott5",
+            "esm2"
+        ]
+
+
+    Pre-computed fusion embedding:
+
+        embedding_files = {
+            "fusion": "fusion.npz"
+        }
+
+        embedding_sources = ["fusion"]
+
+    Handcrafted features are added automatically when their
+    corresponding paths are supplied to the constructor.
+    """
+
+    # ========================================================
     # 1. INITIALIZATION
-    # ============================================================
+    # ========================================================
 
     def __init__(
         self,
-        embedding_file = None,
-        physio_path = None,
-        blosum_path = None,
-        sinu_path = None,
+        embedding_files=None,
+        physio_path=None,
+        blosum_path=None,
+        sinu_path=None,
         random_state=42,
     ):
-        """
-        Embeddings stacking regression pipeline.
 
-        Features:
-            residue-level embeddings
-            -> mean pooling
-            -> stacking regression
-
-        No:
-            - physicochemical features
-            - BLOSUM features
-            - sinusoidal positional encoding
-            - CNN features
-            - domain-guided attention
-
-        Parameters
-        ----------
-        prott5_embedding_file : str
-            NPZ file containing:
-
-                sequence -> residue-level ProtT5 embedding
-
-        random_state : int
-            Random seed.
-        """
-
-        self.embedding_file = embedding_file
-        self.physio_path = physio_path
-        self.blosum_path = blosum_path
-        self.sinu_path = sinu_path
         self.random_state = random_state
-        
 
-        # --------------------------------------------------------
-        # Load ProtT5 embeddings once.
-        # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Load embedding files
+        # ----------------------------------------------------
 
-        self.embeddings = data_util.load_embeddings(embedding_file)
-        
-        
-        if self.physio_path:
-            self.physio_features = physiochem_feature_extractor.load_physio_features_as_numpy_all(physio_path)
-        
-        if self.blosum_path: 
-            self.blosum_features = blosum62.load_blosum62_features(blosum_path)
-        
-        if self.sinu_path:
-            self.sinu_features = position_encoding_extractor.load_sinusoidal_encoding(sinu_path)
-            
-            
+        self.embeddings = {}
 
-    # ============================================================
-    # 3. FEATURE POOLING
-    # ============================================================
+        for name, path in (embedding_files or {}).items():
+
+            if not os.path.exists(path):
+                raise FileNotFoundError(
+                    f"Embedding file not found: {path}"
+                )
+
+            print(
+                f"Loading embedding [{name}]: {path}"
+            )
+
+            self.embeddings[name] = (
+                data_util.load_embeddings(path)
+            )
+
+        # ----------------------------------------------------
+        # Load optional handcrafted features
+        # ----------------------------------------------------
+
+        self.physio_features = None
+        self.blosum_features = None
+        self.sinu_features = None
+
+        if physio_path is not None:
+
+            if not os.path.exists(physio_path):
+                raise FileNotFoundError(
+                    f"Physicochemical feature file not found: "
+                    f"{physio_path}"
+                )
+
+            print(
+                f"Loading physicochemical features: "
+                f"{physio_path}"
+            )
+
+            self.physio_features = (
+                physiochem_feature_extractor
+                .load_physio_features_as_numpy_all(
+                    physio_path
+                )
+            )
+
+        if blosum_path is not None:
+
+            if not os.path.exists(blosum_path):
+                raise FileNotFoundError(
+                    f"BLOSUM feature file not found: "
+                    f"{blosum_path}"
+                )
+
+            print(
+                f"Loading BLOSUM62 features: "
+                f"{blosum_path}"
+            )
+
+            self.blosum_features = (
+                blosum62.load_blosum62_features(
+                    blosum_path
+                )
+            )
+
+        if sinu_path is not None:
+
+            if not os.path.exists(sinu_path):
+                raise FileNotFoundError(
+                    f"Sinusoidal feature file not found: "
+                    f"{sinu_path}"
+                )
+
+            print(
+                f"Loading sinusoidal features: "
+                f"{sinu_path}"
+            )
+
+            self.sinu_features = (
+                position_encoding_extractor
+                .load_sinusoidal_encoding(
+                    sinu_path
+                )
+            )
+
+        self._print_configuration()
+
+    # ========================================================
+    # 2. CONFIGURATION
+    # ========================================================
+
+    def _print_configuration(self):
+
+        print("\n" + "=" * 70)
+        print("STACKING REGRESSION PIPELINE")
+        print("=" * 70)
+
+        print(
+            "\nEmbedding sources loaded:"
+        )
+
+        if self.embeddings:
+
+            for name, embedding in self.embeddings.items():
+
+                print(
+                    f"  - {name:<15} "
+                    f"{len(embedding):>6} sequences"
+                )
+
+        else:
+
+            print("  None")
+
+        print("\nAdditional features:")
+
+        print(
+            f"  - Physicochemical : "
+            f"{self.physio_features is not None}"
+        )
+
+        print(
+            f"  - BLOSUM62        : "
+            f"{self.blosum_features is not None}"
+        )
+
+        print(
+            f"  - Sinusoidal      : "
+            f"{self.sinu_features is not None}"
+        )
+
+        print("=" * 70)
+
+    # ========================================================
+    # 3. EMBEDDING POOLING
+    # ========================================================
 
     @staticmethod
     def mean_pool(arr):
+
         """
-        Mean-pool residue-level ProtT5 embeddings.
+        Mean-pool residue-level embeddings.
 
         Parameters
         ----------
         arr : np.ndarray
-            Shape:
+
+            Either:
 
                 (sequence_length, embedding_dim)
 
@@ -114,6 +264,7 @@ class StackingRegressionPipeline:
         Returns
         -------
         np.ndarray
+
             Shape:
 
                 (embedding_dim,)
@@ -124,120 +275,239 @@ class StackingRegressionPipeline:
             dtype=np.float32,
         )
 
-        # Already pooled.
+        # Already pooled
         if arr.ndim == 1:
             return arr
 
-        if arr.ndim != 2:
-            raise ValueError(
-                "Expected ProtT5 embedding to be 1D or 2D, "
-                f"but got shape {arr.shape}"
-            )
+        # Residue-level embedding
+        if arr.ndim == 2:
 
-        return np.mean(
-            arr,
-            axis=0,
-        ).astype(np.float32)
+            return np.mean(
+                arr,
+                axis=0,
+            ).astype(np.float32)
 
-    # ============================================================
-    # 4. FEATURE EXTRACTION
-    # ============================================================
+        raise ValueError(
+            "Expected embedding to be 1D or 2D, "
+            f"but received shape {arr.shape}"
+        )
 
-    def get_embedding_features(
+    # ========================================================
+    # 4. GET EMBEDDING
+    # ========================================================
+
+    def get_embedding(
         self,
         sequence,
+        source,
         pooling="mean",
     ):
+
         """
-        Extract PURE ProtT5 features for one sequence.
+        Retrieve and pool an embedding for one sequence.
 
         Parameters
         ----------
         sequence : str
             Protein sequence.
 
-        pooling : str
-            Currently only:
+        source : str
+            Embedding source name.
 
-                "mean"
+        pooling : str
+            Currently only "mean".
 
         Returns
         -------
         np.ndarray
-            1D ProtT5 feature vector.
+            Pooled embedding.
         """
 
-        sequence = str(sequence)
+        if source not in self.embeddings:
 
-        if sequence not in self.embeddings:
+            raise ValueError(
+                f"Embedding source '{source}' is not loaded.\n"
+                f"Available sources: "
+                f"{list(self.embeddings.keys())}"
+            )
+            
+        print(f"Embedding source used for trainin is : {source}")
+        embedding_dict = self.embeddings[source]
+
+        if sequence not in embedding_dict:
+
             raise KeyError(
-                "Sequence not found in ProtT5 embedding file:\n"
+                f"Sequence not found in "
+                f"'{source}' embedding file:\n"
                 f"{sequence}"
             )
 
-        embedding = self.embeddings[
-            sequence
-        ]
+        embedding = embedding_dict[sequence]
 
-        if pooling == "mean":
-
-            feature = self.mean_pool(
-                embedding
-            )
-
-        else:
+        if pooling != "mean":
 
             raise ValueError(
-                f"Unknown pooling method: {pooling}. "
+                f"Unsupported pooling method: {pooling}. "
                 "Currently only 'mean' is supported."
             )
 
-        return feature.astype(
-            np.float32
+        return self.mean_pool(embedding)
+
+    # ========================================================
+    # 5. GET ADDITIONAL FEATURES
+    # ========================================================
+
+    def get_extra_features(self, sequence):
+
+        """
+        Retrieve all optional handcrafted features.
+
+        Returns
+        -------
+        list[np.ndarray]
+            List of feature vectors.
+        """
+
+        features = []
+
+        feature_sources = [
+            self.physio_features,
+            self.blosum_features,
+            self.sinu_features,
+        ]
+
+        for feature_dict in feature_sources:
+
+            if feature_dict is None:
+                continue
+
+            if sequence not in feature_dict:
+
+                raise KeyError(
+                    "Sequence not found in one of the "
+                    "handcrafted feature files:\n"
+                    f"{sequence}"
+                )
+
+            feature = np.asarray(
+                feature_dict[sequence],
+                dtype=np.float32,
+            ).ravel()
+
+            features.append(feature)
+
+        return features
+
+    # ========================================================
+    # 6. BUILD FEATURES FOR ONE SEQUENCE
+    # ========================================================
+
+    def get_features(
+        self,
+        sequence,
+        embedding_sources,
+        pooling="mean",
+    ):
+
+        """
+        Build the complete feature vector for one sequence.
+
+        Features consist of:
+
+            Selected embeddings
+                    +
+            Optional physicochemical features
+                    +
+            Optional BLOSUM62 features
+                    +
+            Optional sinusoidal features
+
+        All features are concatenated.
+
+        Example
+        -------
+
+        embedding_sources=["prott5"]
+
+            ProtT5 + optional handcrafted features
+
+        embedding_sources=["prott5", "esm2"]
+
+            ProtT5 + ESM2 + optional handcrafted features
+
+        embedding_sources=["fusion"]
+
+            Fusion embedding + optional handcrafted features
+        """
+
+        if not embedding_sources:
+
+            raise ValueError(
+                "embedding_sources cannot be empty."
+            )
+
+        features = []
+
+        # ----------------------------------------------------
+        # Embedding features
+        # ----------------------------------------------------
+
+        for source in embedding_sources:
+
+            feature = self.get_embedding(
+                sequence=sequence,
+                source=source,
+                pooling=pooling,
+            )
+
+            features.append(feature)
+
+        # ----------------------------------------------------
+        # Handcrafted features
+        # ----------------------------------------------------
+
+        features.extend(
+            self.get_extra_features(sequence)
         )
 
-    # ============================================================
-    # 5. PREPARE DATASET
-    # ============================================================
+        if not features:
+
+            raise ValueError(
+                "No features were generated."
+            )
+
+        return np.concatenate(
+            features,
+            axis=0,
+        ).astype(np.float32)
+
+    # ========================================================
+    # 7. PREPARE DATASET SPLIT
+    # ========================================================
 
     def prepare_split(
         self,
         dataset_split,
+        embedding_sources,
         pooling="mean",
     ):
+
         """
-        Convert a dataset DataFrame into X and y.
+        Convert a DataFrame into X and y.
 
         Required columns:
 
             sequence
             value
-
-        Parameters
-        ----------
-        dataset_split : pd.DataFrame
-            Train, validation, or test DataFrame.
-
-        pooling : str
-            pooling method.
-
-        Returns
-        -------
-        X : np.ndarray
-            Shape:
-
-                (n_samples, 1024)
-
-        y : np.ndarray
-            Shape:
-
-                (n_samples,)
         """
+        
+        print(f"The embeddings sources are: {embedding_sources}")
 
         if not isinstance(
             dataset_split,
             pd.DataFrame,
         ):
+
             raise TypeError(
                 "dataset_split must be a pandas DataFrame."
             )
@@ -253,6 +523,7 @@ class StackingRegressionPipeline:
         )
 
         if missing_columns:
+
             raise ValueError(
                 "Missing required columns: "
                 f"{sorted(missing_columns)}"
@@ -265,40 +536,21 @@ class StackingRegressionPipeline:
             index=False
         ):
 
-            sequence = str(
-                row.sequence
-            )
+            sequence = str(row.sequence)
 
-            features = self.get_embedding_features(
-                sequence,
+            feature = self.get_features(
+                sequence=sequence,
+                embedding_sources=embedding_sources,
                 pooling=pooling,
             )
-            
-            if self.physio_features:
-                physio_feat = self.physio_features[sequence]
-                features = np.concatenate(
-                    [features, physio_feat],
-                    axis=0
-                ) 
-            
-            if self.blosum_features:
-                blosum_feat = self.blosum_features[sequence]
-                features = np.concatenate([features, blosum_feat], axis=0)
-            
-            if self.sinu_features:
-                sinu_feat = self.sinu_features[sequence]
-                features = np.concatenate([features, sinu_feat], axis=0)
-                
 
-            X_list.append(
-                features
-            )
-
+            X_list.append(feature)
             y_list.append(
                 float(row.value)
             )
 
         if not X_list:
+
             raise ValueError(
                 "Dataset split is empty."
             )
@@ -312,30 +564,27 @@ class StackingRegressionPipeline:
             y_list,
             dtype=np.float32,
         )
-        print(f"Final Shape of Input Features: ", X.shape)
+
+        print(
+            f"Feature matrix shape: {X.shape}"
+        )
 
         return X, y
 
-    # ============================================================
-    # 6. STACKING MODEL
-    # ============================================================
+    # ========================================================
+    # 8. BUILD STACKING ENSEMBLE
+    # ========================================================
 
     def build_stacking_ensemble(self):
+
         """
-        Build the stacking regression ensemble.
-
-        Scaling is included inside the individual pipelines.
-
-        This is important because StackingRegressor performs
-        internal CV on the outer training data. Each scaler is
-        therefore fitted only on the corresponding inner-training
-        portion.
+        Build stacking regression ensemble.
 
         Base estimators:
 
             1. Ridge
             2. SVR
-            3. ExtraTrees
+            3. Extra Trees
             4. HistGradientBoosting
             5. KNN
             6. MLP
@@ -344,22 +593,27 @@ class StackingRegressionPipeline:
         Meta learner:
 
             RidgeCV
+
+        Scaling is performed inside the estimators that
+        require it.
         """
 
         base_estimators = [
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # Ridge
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             (
                 "ridge",
+
                 Pipeline(
                     [
                         (
                             "scaler",
                             StandardScaler(),
                         ),
+
                         (
                             "model",
                             Ridge(
@@ -370,18 +624,20 @@ class StackingRegressionPipeline:
                 ),
             ),
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # SVR
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             (
                 "svr",
+
                 Pipeline(
                     [
                         (
                             "scaler",
                             StandardScaler(),
                         ),
+
                         (
                             "model",
                             SVR(
@@ -394,12 +650,13 @@ class StackingRegressionPipeline:
                 ),
             ),
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # Extra Trees
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             (
                 "extra_trees",
+
                 ExtraTreesRegressor(
                     n_estimators=150,
                     max_depth=16,
@@ -408,12 +665,13 @@ class StackingRegressionPipeline:
                 ),
             ),
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # HistGradientBoosting
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             (
                 "hist_gb",
+
                 HistGradientBoostingRegressor(
                     max_iter=150,
                     l2_regularization=1.0,
@@ -421,18 +679,20 @@ class StackingRegressionPipeline:
                 ),
             ),
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # KNN
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             (
                 "knn",
+
                 Pipeline(
                     [
                         (
                             "scaler",
                             StandardScaler(),
                         ),
+
                         (
                             "model",
                             KNeighborsRegressor(
@@ -446,18 +706,20 @@ class StackingRegressionPipeline:
                 ),
             ),
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # MLP
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             (
                 "mlp",
+
                 Pipeline(
                     [
                         (
                             "scaler",
                             StandardScaler(),
                         ),
+
                         (
                             "model",
                             MLPRegressor(
@@ -476,12 +738,13 @@ class StackingRegressionPipeline:
                 ),
             ),
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # XGBoost
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             (
                 "xgb",
+
                 XGBRegressor(
                     n_estimators=150,
                     max_depth=5,
@@ -494,9 +757,9 @@ class StackingRegressionPipeline:
             ),
         ]
 
-        # ========================================================
+        # ====================================================
         # Meta learner
-        # ========================================================
+        # ====================================================
 
         meta_learner = RidgeCV(
             alphas=np.logspace(
@@ -506,9 +769,9 @@ class StackingRegressionPipeline:
             )
         )
 
-        # ========================================================
-        # Internal CV for stacking
-        # ========================================================
+        # ====================================================
+        # Internal stacking CV
+        # ====================================================
 
         internal_cv = KFold(
             n_splits=5,
@@ -516,85 +779,117 @@ class StackingRegressionPipeline:
             random_state=self.random_state,
         )
 
-        # ========================================================
+        # ====================================================
         # Stacking model
-        # ========================================================
+        # ====================================================
 
-        stacking_model = StackingRegressor(
+        return StackingRegressor(
             estimators=base_estimators,
             final_estimator=meta_learner,
             cv=internal_cv,
             n_jobs=-1,
         )
 
-        return stacking_model
-
-    # ============================================================
-    # 7. RUN FIVE-FOLD EVALUATION
-    # ============================================================
+    # ========================================================
+    # 9. RUN FIVE-FOLD EVALUATION
+    # ========================================================
 
     def run_stacking_pipeline(
         self,
         dataset_csv,
-        metric_evaluator,
+        metric_evaluator: Metric,
+        embedding_sources,
         pooling="mean",
     ):
+
         """
-        Run five-fold evaluation using a FIXED independent
+        Run five-fold evaluation with a fixed independent
         test set.
 
         Dataset design:
 
-            Development:
-                4,074 samples
+            Development = 4,074
+            Fixed test = 719
 
-            Fixed independent test:
-                719 samples
+        Outer CV:
 
-            Development CV:
-                5 folds
+            Fold 1:
+                Train = 4 development folds
+                Validation = 1 development fold
+                Test = fixed 719
 
-        For each outer fold:
+            ...
 
-            Train:
-                4 development folds
+            Fold 5:
+                Train = 4 development folds
+                Validation = 1 development fold
+                Test = fixed 719
 
-            Validation:
-                1 development fold
-
-            Test:
-                same fixed 719 samples
-
-        The fixed test set is never used for training,
-        validation, or model selection.
+        The fixed test set is never used during model fitting
+        or validation.
         """
 
-        # --------------------------------------------------------
-        # Check dataset file
-        # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Check dataset
+        # ----------------------------------------------------
 
-        if not os.path.exists(
-            dataset_csv
-        ):
+        if not os.path.exists(dataset_csv):
+
             raise FileNotFoundError(
-                f"Dataset CSV not found: {dataset_csv}"
+                f"Dataset CSV not found: "
+                f"{dataset_csv}"
             )
+
+        if not embedding_sources:
+
+            raise ValueError(
+                "embedding_sources cannot be empty."
+            )
+
+        # ----------------------------------------------------
+        # Verify requested embedding sources
+        # ----------------------------------------------------
+
+        missing_sources = [
+            source
+            for source in embedding_sources
+            if source not in self.embeddings
+        ]
+
+        if missing_sources:
+
+            raise ValueError(
+                "Requested embedding sources are not loaded: "
+                f"{missing_sources}\n"
+                f"Available: {list(self.embeddings.keys())}"
+            )
+
+        print("\n" + "=" * 70)
+        print("EXPERIMENT CONFIGURATION")
+        print("=" * 70)
+
+        print(
+            f"Embedding sources: "
+            f"{embedding_sources}"
+        )
+
+        print(
+            f"Pooling: {pooling}"
+        )
+
+        print("=" * 70)
 
         val_metrics = []
         test_metrics = []
-
         fold_results = []
 
         fixed_test_sequences = None
 
-        # ========================================================
+        # ====================================================
         # Outer five-fold CV
-        # ========================================================
+        # ====================================================
 
-        for fold_number in range(
-            1,
-            6,
-        ):
+        for fold_number in range(1, 6):
 
             print("\n" + "=" * 70)
             print(
@@ -602,32 +897,32 @@ class StackingRegressionPipeline:
             )
             print("=" * 70)
 
-            # ----------------------------------------------------
-            # Retrieve split
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # Get split
+            # ------------------------------------------------
 
             train_set, val_set, test_set = (
                 data_util.get_cv_split(
                     input_csv_path=dataset_csv,
                     fold=fold_number,
-                )  #train_set, val_set and test_set are dataframes
+                )
             )
 
             print(
-                f"Train     : {len(train_set)}"
+                f"Train      : {len(train_set)}"
             )
 
             print(
-                f"Validation: {len(val_set)}"
+                f"Validation : {len(val_set)}"
             )
 
             print(
-                f"Fixed Test: {len(test_set)}"
+                f"Fixed Test : {len(test_set)}"
             )
 
-            # ----------------------------------------------------
-            # Verify that the test set is fixed
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # Verify fixed test set
+            # ------------------------------------------------
 
             test_sequences = (
                 test_set["sequence"]
@@ -638,97 +933,96 @@ class StackingRegressionPipeline:
             if fixed_test_sequences is None:
 
                 fixed_test_sequences = (
-                    test_sequences
+                    test_sequences.copy()
                 )
 
-            elif sorted(
-                test_sequences
-            ) != sorted(
+            elif sorted(test_sequences) != sorted(
                 fixed_test_sequences
             ):
 
                 raise ValueError(
-                    "Test set is NOT fixed across folds. "
+                    "Fixed test set changed across folds. "
                     f"Mismatch detected at fold "
                     f"{fold_number}."
                 )
 
-            # ----------------------------------------------------
-            # Prepare ProtT5 features
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # Prepare features
+            # ------------------------------------------------
 
-            X_train, y_train = (
-                self.prepare_split(
-                    train_set,
-                    pooling=pooling,
-                )
+            print("\nPreparing training features...")
+
+            X_train, y_train = self.prepare_split(
+                train_set,
+                embedding_sources=embedding_sources,
+                pooling=pooling,
             )
 
-            X_val, y_val = (
-                self.prepare_split(
-                    val_set,
-                    pooling=pooling,
-                )
+            print("Preparing validation features...")
+
+            X_val, y_val = self.prepare_split(
+                val_set,
+                embedding_sources=embedding_sources,
+                pooling=pooling,
             )
 
-            X_test, y_test = (
-                self.prepare_split(
-                    test_set,
-                    pooling=pooling,
-                )
+            print("Preparing fixed-test features...")
+
+            X_test, y_test = self.prepare_split(
+                test_set,
+                embedding_sources=embedding_sources,
+                pooling=pooling,
             )
 
-            print(
-                f"Feature dimension: "
-                f"{X_train.shape[1]}"
-            )
+            # ------------------------------------------------
+            # Verify dimensions
+            # ------------------------------------------------
 
-            # ----------------------------------------------------
-            # Verify feature dimensions
-            # ----------------------------------------------------
+            feature_dim = X_train.shape[1]
 
-            if X_val.shape[1] != X_train.shape[1]:
+            if X_val.shape[1] != feature_dim:
+
                 raise ValueError(
                     "Training and validation feature "
                     "dimensions do not match."
                 )
 
-            if X_test.shape[1] != X_train.shape[1]:
+            if X_test.shape[1] != feature_dim:
+
                 raise ValueError(
                     "Training and test feature "
                     "dimensions do not match."
                 )
 
-            # ----------------------------------------------------
-            # Build stacking model
-            # ----------------------------------------------------
+            print(
+                f"\nFinal feature dimension: "
+                f"{feature_dim}"
+            )
+
+            # ------------------------------------------------
+            # Build model
+            # ------------------------------------------------
 
             model = (
                 self.build_stacking_ensemble()
             )
 
+            # ------------------------------------------------
+            # Train
+            # ------------------------------------------------
+
             print(
                 "\nTraining stacking ensemble..."
             )
-
-            # ----------------------------------------------------
-            # Train
-            #
-            # IMPORTANT:
-            # No global StandardScaler is applied here.
-            #
-            # Scaling is handled inside the individual
-            # base-estimator pipelines.
-            # ----------------------------------------------------
 
             model.fit(
                 X_train,
                 y_train,
             )
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # Predictions
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             val_pred = model.predict(
                 X_val
@@ -738,9 +1032,9 @@ class StackingRegressionPipeline:
                 X_test
             )
 
-            # ----------------------------------------------------
-            # Flatten arrays
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # Flatten
+            # ------------------------------------------------
 
             y_val = np.asarray(
                 y_val,
@@ -762,25 +1056,27 @@ class StackingRegressionPipeline:
                 dtype=np.float64,
             ).reshape(-1)
 
-            # ----------------------------------------------------
-            # Check prediction lengths
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # Prediction length checks
+            # ------------------------------------------------
 
             if len(y_val) != len(val_pred):
+
                 raise ValueError(
                     "Validation target/prediction "
                     "length mismatch."
                 )
 
             if len(y_test) != len(test_pred):
+
                 raise ValueError(
                     "Test target/prediction "
                     "length mismatch."
                 )
 
-            # ----------------------------------------------------
-            # Compute metrics
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # Metrics
+            # ------------------------------------------------
 
             val_metric = (
                 metric_evaluator.compute_metrics(
@@ -804,9 +1100,9 @@ class StackingRegressionPipeline:
                 test_metric
             )
 
-            # ====================================================
-            # Print validation results
-            # ====================================================
+            # =================================================
+            # Print validation
+            # =================================================
 
             print(
                 f"\nFold {fold_number} Validation:"
@@ -816,9 +1112,9 @@ class StackingRegressionPipeline:
                 val_metric
             )
 
-            # ====================================================
-            # Print fixed-test results
-            # ====================================================
+            # =================================================
+            # Print fixed test
+            # =================================================
 
             print(
                 f"\nFold {fold_number} Fixed Test:"
@@ -828,9 +1124,9 @@ class StackingRegressionPipeline:
                 test_metric
             )
 
-            # ====================================================
+            # =================================================
             # Analyze meta learner
-            # ====================================================
+            # =================================================
 
             stacking_weights = (
                 self.analyze_stacking_weights(
@@ -839,37 +1135,32 @@ class StackingRegressionPipeline:
                 )
             )
 
-            # ====================================================
-            # Save fold results
-            # ====================================================
-
-            fold_result = {
-
-                "fold": fold_number,
-
-                "val_y_true": y_val,
-                "val_y_pred": val_pred,
-
-                "test_y_true": y_test,
-                "test_y_pred": test_pred,
-
-                "stacking_weights": (
-                    stacking_weights
-                ),
-
-                "model": model,
-            }
+            # =================================================
+            # Store fold results
+            # =================================================
 
             fold_results.append(
-                fold_result
+                {
+                    "fold": fold_number,
+
+                    "val_y_true": y_val,
+                    "val_y_pred": val_pred,
+
+                    "test_y_true": y_test,
+                    "test_y_pred": test_pred,
+
+                    "stacking_weights":
+                        stacking_weights,
+
+                    "model": model,
+                }
             )
 
-        # ========================================================
+        # ====================================================
         # Final summary
-        # ========================================================
+        # ====================================================
 
         print("\n")
-
         print("=" * 70)
         print(
             "FINAL 5-FOLD SUMMARY — FIXED TEST SET"
@@ -888,35 +1179,31 @@ class StackingRegressionPipeline:
             )
         )
 
-        # ========================================================
-        # Return all results
-        # ========================================================
+        # ====================================================
+        # Return results
+        # ====================================================
 
         return {
+            "validation_metrics":
+                val_metrics,
 
-            "validation_metrics": (
-                val_metrics
-            ),
+            "test_metrics":
+                test_metrics,
 
-            "test_metrics": (
-                test_metrics
-            ),
+            "summary":
+                summary_df,
 
-            "summary": summary_df,
-
-            "fold_results": (
-                fold_results
-            ),
+            "fold_results":
+                fold_results,
         }
 
-    # ============================================================
-    # 8. PRINT METRICS
-    # ============================================================
+    # ========================================================
+    # 10. PRINT METRICS
+    # ========================================================
 
     @staticmethod
-    def print_metrics(
-        metrics
-    ):
+    def print_metrics(metrics):
+
         """
         Print regression metrics in a consistent order.
         """
@@ -939,20 +1226,19 @@ class StackingRegressionPipeline:
                     f"{metrics[key]:.4f}"
                 )
 
-    # ============================================================
-    # 9. SUMMARIZE FIVE FOLDS
-    # ============================================================
+    # ========================================================
+    # 11. SUMMARIZE METRICS
+    # ========================================================
 
     @staticmethod
     def summarize_metrics(
-        metrics_list
+        metrics_list,
     ):
+
         """
         Calculate mean and sample standard deviation
         across the five outer folds.
         """
-
-        rows = []
 
         metric_names = [
             "Pearson_R",
@@ -963,12 +1249,14 @@ class StackingRegressionPipeline:
             "R2",
         ]
 
-        for key in metric_names:
+        rows = []
+
+        for metric_name in metric_names:
 
             values = [
-                metric[key]
+                metric[metric_name]
                 for metric in metrics_list
-                if key in metric
+                if metric_name in metric
             ]
 
             if not values:
@@ -976,10 +1264,12 @@ class StackingRegressionPipeline:
 
             rows.append(
                 {
-                    "Metric": key,
+                    "Metric": metric_name,
+
                     "Mean": np.mean(
                         values
                     ),
+
                     "Std": np.std(
                         values,
                         ddof=1,
@@ -987,30 +1277,28 @@ class StackingRegressionPipeline:
                 }
             )
 
-        return pd.DataFrame(
-            rows
-        )
+        return pd.DataFrame(rows)
 
-    # ============================================================
-    # 10. META LEARNER ANALYSIS
-    # ============================================================
+    # ========================================================
+    # 12. ANALYZE STACKING WEIGHTS
+    # ========================================================
 
     @staticmethod
     def analyze_stacking_weights(
         stacking_model,
         fold_idx,
     ):
+
         """
         Extract meta-learner coefficients.
 
-        The coefficients correspond to the base-model
-        predictions used by the RidgeCV meta learner.
+        Coefficients represent the relationship between
+        base-model predictions and the final RidgeCV
+        prediction.
 
-        Note:
-            Absolute coefficient magnitude is useful for
-            inspecting the meta learner, but should not be
-            interpreted as a direct percentage of predictive
-            importance.
+        Absolute coefficient magnitude should NOT be
+        interpreted as direct predictive importance or
+        percentage contribution.
         """
 
         estimator_names = [
@@ -1029,48 +1317,56 @@ class StackingRegressionPipeline:
         if len(coefficients) != len(
             estimator_names
         ):
+
             raise ValueError(
                 "Number of meta-learner coefficients "
-                "does not match number of base estimators."
+                "does not match number of base "
+                "estimators."
             )
 
-        df = pd.DataFrame(
+        weights_df = pd.DataFrame(
             {
-                "Base_Model": estimator_names,
+                "Base_Model":
+                    estimator_names,
 
-                "Coefficient": (
-                    coefficients
-                ),
+                "Coefficient":
+                    coefficients,
 
-                "Absolute_Weight": np.abs(
-                    coefficients
-                ),
+                "Absolute_Weight":
+                    np.abs(coefficients),
             }
         )
 
-        total = df[
-            "Absolute_Weight"
-        ].sum()
+        total = (
+            weights_df["Absolute_Weight"]
+            .sum()
+        )
 
         if total > 0:
 
-            df[
+            weights_df[
                 "Coefficient_Abs_Percent"
             ] = (
-                df["Absolute_Weight"]
+                weights_df[
+                    "Absolute_Weight"
+                ]
                 / total
                 * 100
             )
 
         else:
 
-            df[
+            weights_df[
                 "Coefficient_Abs_Percent"
             ] = 0.0
 
-        df = df.sort_values(
-            "Absolute_Weight",
-            ascending=False,
+        weights_df = (
+            weights_df
+            .sort_values(
+                "Absolute_Weight",
+                ascending=False,
+            )
+            .reset_index(drop=True)
         )
 
         print(
@@ -1079,14 +1375,14 @@ class StackingRegressionPipeline:
         )
 
         print(
-            df.to_string(
+            weights_df.to_string(
                 index=False
             )
         )
 
-        # --------------------------------------------------------
+        # ----------------------------------------------------
         # Intercept
-        # --------------------------------------------------------
+        # ----------------------------------------------------
 
         intercept = float(
             np.asarray(
@@ -1099,20 +1395,25 @@ class StackingRegressionPipeline:
             f"{intercept:.4f}"
         )
 
-        return df
+        return weights_df
 
-    # ============================================================
-    # 11. SAVE RESULTS
-    # ============================================================
+    # ========================================================
+    # 13. SAVE RESULTS
+    # ========================================================
 
     @staticmethod
     def save_results(
         results,
         output_dir,
-        prefix="prott5_stacking",
+        prefix="stacking",
     ):
+
         """
-        Save summary and fold-level test metrics.
+        Save:
+
+            1. Summary metrics
+            2. Fold-level metrics
+            3. Meta-learner coefficients
         """
 
         os.makedirs(
@@ -1120,9 +1421,9 @@ class StackingRegressionPipeline:
             exist_ok=True,
         )
 
-        # ========================================================
+        # ----------------------------------------------------
         # Summary
-        # ========================================================
+        # ----------------------------------------------------
 
         summary_file = os.path.join(
             output_dir,
@@ -1136,9 +1437,9 @@ class StackingRegressionPipeline:
             index=False,
         )
 
-        # ========================================================
-        # Fold-level metrics
-        # ========================================================
+        # ----------------------------------------------------
+        # Fold metrics
+        # ----------------------------------------------------
 
         fold_rows = []
 
@@ -1151,13 +1452,9 @@ class StackingRegressionPipeline:
                 "Fold": fold_idx
             }
 
-            row.update(
-                metrics
-            )
+            row.update(metrics)
 
-            fold_rows.append(
-                row
-            )
+            fold_rows.append(row)
 
         fold_df = pd.DataFrame(
             fold_rows
@@ -1173,9 +1470,9 @@ class StackingRegressionPipeline:
             index=False,
         )
 
-        # ========================================================
-        # Save stacking coefficients
-        # ========================================================
+        # ----------------------------------------------------
+        # Meta learner weights
+        # ----------------------------------------------------
 
         weight_rows = []
 
@@ -1183,9 +1480,9 @@ class StackingRegressionPipeline:
             "fold_results"
         ]:
 
-            fold_idx = (
-                fold_result["fold"]
-            )
+            fold_idx = fold_result[
+                "fold"
+            ]
 
             weights_df = (
                 fold_result[
@@ -1222,7 +1519,7 @@ class StackingRegressionPipeline:
             )
 
             print(
-                f"Saved meta weights: "
+                f"\nSaved meta weights: "
                 f"{weights_file}"
             )
 
@@ -1237,69 +1534,150 @@ class StackingRegressionPipeline:
         )
 
 
-# =================================================================
+# ============================================================
 # MAIN
-# =================================================================
+# ============================================================
 
 if __name__ == "__main__":
-    
+
+    # ========================================================
+    # Dataset
+    # ========================================================
+
     DATASET_CSV = (
         "./data/ecoli_five_fold_dataset.csv"
     )
+
+    # ========================================================
+    # Embedding files
+    #
+    # You can keep all available embeddings here.
+    # Only the ones listed in `embedding_sources` are used.
+    # ========================================================
+
     EMBEDDING_FILES = {
-        'PROTT5':'prott5/prot_t5_xl_uniref50_ecoli.npz',
-        'PROSTT5': 'prott5/ProstT5_ecoli.npz' ,
-        'ESM_320': 'esm2/esm2_t6_8M_UR50D_dim_320_ecoli.npz',
-        'ESM_640': 'esm2/esm2_t30_150M_UR50D_dim_640_ecoli.npz',
-        'ESM_1280': 'esm2/esm2_t33_650M_UR50D_1280_ecoli.npz'
+
+        "prott5":
+            "./data/prott5/"
+            "prot_t5_xl_uniref50_ecoli.npz",
+
+        "ft_prott5":
+            "./data/prott5/"
+            "ecoli_finetuned_prott5.npz",
+
+        "esm2":
+            "./data/esm2/"
+            "esm2_t33_650M_UR50D_1280_ecoli.npz",
+
+        # Uncomment when a pre-computed fusion
+        # embedding is available.
+        #
+        # "fusion":
+        #     "./data/fusion/"
+        #     "fused_embeddings.npz",
     }
 
+    # ========================================================
+    # Select experiment
+    # ========================================================
+    #
+    # Examples:
+    #
+    #   ["prott5"]
+    #
+    #   ["ft_prott5"]
+    #
+    #   ["esm2"]
+    #
+    #   ["prott5", "esm2"]
+    #
+    #   ["fusion"]
+    #
+    # ========================================================
 
-    # ============================================================
-    # Embedding based stacking pipeline
-    # ============================================================
+    EMBEDDING_SOURCES = [
+        "ft_prott5" #prott5
+    ]
 
-    embedding_path = f"./data/{EMBEDDING_FILES['PROTT5']}"
-    print("Embedding Path Set : ", embedding_path)
-    
-    out_name = Path(embedding_path).name.split(".")[0]
-    output_path = f"./results/{out_name}_emb_physio_blosum_Sinu"
-    print(f"Output Path: {output_path}")
+    # ========================================================
+    # Optional handcrafted features
+    #
+    # Set any path to None to disable that feature.
+    # ========================================================
 
-    
-    pipeline = (
-        StackingRegressionPipeline(
-            embedding_file=embedding_path,
-            physio_path = "./data/ecoli_phyiochem.csv",
-            blosum_path = "./data/ecoli_blosum62_features.csv",
-            sinu_path = "./data/ecoli_sinusoidal_encoding.csv",
-            random_state=42,
-        )
+    PHYSIO_PATH = (
+        "./data/ecoli_phyiochem.csv"
     )
-    
+
+    BLOSUM_PATH = (
+        "./data/ecoli_blosum62_features.csv"
+    )
+
+    SINU_PATH = (
+        "./data/ecoli_sinusoidal_encoding.csv"
+    )
+
+    # ========================================================
+    # Output
+    # ========================================================
+
+    EXPERIMENT_NAME = (
+        "Finetuned_ProtT5"
+    )
+
+    OUTPUT_PATH = (
+        f"./results/{EXPERIMENT_NAME}"
+    )
+
+    # ========================================================
+    # Create pipeline
+    # ========================================================
+
+    pipeline = StackingRegressionPipeline(
+
+        embedding_files=EMBEDDING_FILES,
+
+        physio_path=PHYSIO_PATH,
+
+        blosum_path=BLOSUM_PATH,
+
+        sinu_path=SINU_PATH,
+
+        random_state=42,
+    )
+
+    # ========================================================
+    # Metric evaluator
+    # ========================================================
+
     metric = Metric(
         "RegressionMetrics"
     )
-    
-    # ============================================================
-    # Five-fold evaluation
-    # ============================================================
 
-    results = (
-        pipeline.run_stacking_pipeline(
-            dataset_csv=DATASET_CSV,
-            metric_evaluator=metric,
-            pooling="mean",
-        )
+    # ========================================================
+    # Five-fold evaluation
+    # ========================================================
+
+    results = pipeline.run_stacking_pipeline(
+
+        dataset_csv=DATASET_CSV,
+
+        metric_evaluator=metric,
+
+        embedding_sources=EMBEDDING_SOURCES,
+
+        pooling="mean",
     )
 
-    # ============================================================
+    # ========================================================
     # Save results
-    # ============================================================
-    
-    
+    # ========================================================
+
     pipeline.save_results(
+
         results,
-        output_dir=output_path,
-        prefix="",
+
+        output_dir=OUTPUT_PATH,
+
+        prefix="stacking",
     )

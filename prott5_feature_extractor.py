@@ -158,6 +158,244 @@ def save_embeddings(original_seqs, processed_seqs, embeddings, filepath):
     print(f"Saved embeddings to {filepath}")
 
 
+def read_hemolysis_csv(csv_path):
+    """
+    Read a hemolysis CSV file and return the sequence list.
+    Expected column: SEQUENCE
+    """
+    df = pd.read_csv(csv_path)
+
+    if "SEQUENCE" not in df.columns:
+        raise ValueError(
+            f"'SEQUENCE' column not found in {csv_path}. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    sequences = (
+        df["SEQUENCE"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+
+    return sequences
+
+def get_hemolysis_sequences( cross_val_csv, independent_csv):
+    """
+    Read sequences from both cross-validation and independent datasets.
+    Does not modify any existing dataset-loading methods.
+    """
+    cross_val_sequences = read_hemolysis_csv(cross_val_csv)
+    independent_sequences = read_hemolysis_csv(independent_csv)
+
+    print(f"Cross-validation sequences : {len(cross_val_sequences)}")
+    print(f"Independent-test sequences : {len(independent_sequences)}")
+
+    # Check overlap
+    cross_set = set(cross_val_sequences)
+    independent_set = set(independent_sequences)
+
+    overlap = cross_set.intersection(independent_set)
+
+    if overlap:
+        print(
+            f"WARNING: {len(overlap)} sequences occur in both "
+            f"cross-validation and independent datasets."
+        )
+    else:
+        print("No sequence overlap detected.")
+
+    # Preserve order while removing duplicates
+    all_sequences = list(
+        dict.fromkeys(cross_val_sequences + independent_sequences)
+    )
+
+    print(f"Total unique sequences       : {len(all_sequences)}")
+
+    return cross_val_sequences, independent_sequences, all_sequences
+
+def preprocess_sequence(sequence):
+    """
+    Preprocess an amino-acid sequence for ProtT5.
+
+    - Replace uncommon/ambiguous amino acids with X.
+    - Insert spaces between residues, as required by ProtT5 tokenizer.
+    """
+    sequence = sequence.strip().upper()
+
+    # Replace uncommon amino acids with X
+    sequence = sequence.replace("U", "X")
+    sequence = sequence.replace("Z", "X")
+    sequence = sequence.replace("O", "X")
+    sequence = sequence.replace("B", "X")
+
+    # ProtT5 expects residues separated by spaces
+    sequence = " ".join(list(sequence))
+
+    return sequence
+
+def compute_hemolysis_prott5_embeddings(
+    sequences,
+    model,
+    tokenizer,
+    device,
+    batch_size=64
+):
+    """
+    Compute ProtT5 residue-level embeddings for hemolysis sequences.
+
+    This is a standalone function and does not modify
+    the existing embedding pipeline.
+    """
+
+    processed_sequences = [
+        preprocess_sequence(seq)
+        for seq in sequences
+    ]
+
+    embeddings = []
+
+    for start in range(0, len(processed_sequences), batch_size):
+
+        batch_sequences = processed_sequences[
+            start:start + batch_size
+        ]
+
+        encoded = tokenizer(
+            batch_sequences,
+            add_special_tokens=True,
+            padding=True,
+            return_tensors="pt"
+        )
+
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask
+            )
+
+        batch_embeddings = outputs.last_hidden_state
+
+        for i in range(len(batch_sequences)):
+
+            # Number of non-padding tokens
+            seq_len_with_eos = attention_mask[i].sum().item()
+
+            # ProtT5 has:
+            # amino acids + <eos>
+            # No <cls> token
+            residue_len = seq_len_with_eos - 1
+
+            # Keep only amino-acid residue embeddings
+            residue_embedding = (
+                batch_embeddings[i, :residue_len, :]
+                .detach()
+                .cpu()
+                .numpy()
+            )
+
+            embeddings.append(residue_embedding)
+
+        print(
+            f"Processed "
+            f"{min(start + batch_size, len(sequences))}"
+            f"/{len(sequences)} sequences"
+        )
+
+        del input_ids
+        del attention_mask
+        del outputs
+        del batch_embeddings
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return processed_sequences, embeddings
+
+def save_hemolysis_prott5_embeddings(
+    cross_val_csv,
+    independent_csv,
+    save_path="./data/hemolysis_prott5.npz",
+    batch_size=64
+):
+    """
+    Generate and save ProtT5 embeddings for the hemolysis
+    cross-validation and independent datasets.
+
+    Existing embedding methods are untouched.
+    """
+
+    # --------------------------------------------------
+    # Instantiate device, model and tokenizer
+    # --------------------------------------------------
+    device = get_device()
+    model, tokenizer = get_model_and_tokenizer(device)
+
+    # --------------------------------------------------
+    # Read both hemolysis datasets
+    # --------------------------------------------------
+    (
+        cross_val_sequences,
+        independent_sequences,
+        all_sequences
+    ) = get_hemolysis_sequences(
+        cross_val_csv,
+        independent_csv
+    )
+
+    print("\nComputing ProtT5 embeddings...")
+
+    # --------------------------------------------------
+    # Compute embeddings
+    # --------------------------------------------------
+    processed_sequences, embeddings = (
+        compute_hemolysis_prott5_embeddings(
+            sequences=all_sequences,
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            batch_size=batch_size
+        )
+    )
+
+    # --------------------------------------------------
+    # Save embeddings
+    # --------------------------------------------------
+    Path(save_path).parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    np.savez_compressed(
+        save_path,
+        original_sequences=np.array(
+            all_sequences,
+            dtype=object
+        ),
+        processed_sequences=np.array(
+            processed_sequences,
+            dtype=object
+        ),
+        embeddings=np.array(
+            embeddings,
+            dtype=object
+        )
+    )
+
+    print("\n========================================")
+    print("Hemolysis ProtT5 embedding generation")
+    print("========================================")
+    print(f"Cross-validation sequences : {len(cross_val_sequences)}")
+    print(f"Independent sequences     : {len(independent_sequences)}")
+    print(f"Total unique sequences    : {len(all_sequences)}")
+    print(f"Total embeddings          : {len(embeddings)}")
+    print(f"First embedding shape     : {embeddings[0].shape}")
+    print(f"Saved to                  : {save_path}")
+    print("========================================")
 
 
 
@@ -210,7 +448,7 @@ def load_embeddings(filepath):
 # ------------------------
 # Entry point
 # ------------------------
-if __name__ == "__main__":
+if __name__ == "__main__0":
     #Ecoli data
     seq_input_path = "./data/ecoli_clustered_dataset_splits.csv"
     save_path = f"./data/ecoli_prott5.npz"
@@ -223,4 +461,15 @@ if __name__ == "__main__":
     print(
         f"First sequence length: {len(original_seqs[0])}, "
         f"embedding shape: {embeddings[0].shape}"
+    )
+
+if __name__ == "__main__":
+    CROSS_VAL_HEMOLYSIS = "./data/hemolysis/cross_val_dataset.csv"
+    INDEPENDENT_HEMOLYSIS = "./data/hemolysis/independent_dataset.csv"
+
+    save_hemolysis_prott5_embeddings(
+        cross_val_csv=CROSS_VAL_HEMOLYSIS,
+        independent_csv=INDEPENDENT_HEMOLYSIS,
+        save_path="./data/hemolysis/hemolysis_prott5.npz",
+        batch_size=64
     )

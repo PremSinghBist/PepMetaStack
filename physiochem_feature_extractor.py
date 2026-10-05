@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from modlamp.descriptors import GlobalDescriptor, PeptideDescriptor
 import pandas as pd
 import numpy as np
@@ -435,15 +437,310 @@ def comp_save_full_physio_with_nc_terminal_bias():
     physio = physio.merge(nc_df, on="sequence", how="left")
 
     physio.to_csv(full_phyisioc_with_nc, index=False)
+    
+# ============================================================
+# NEW: Hemolysis physicochemical feature extraction
+# Existing methods above remain unchanged.
+# ============================================================
+
+def read_hemolysis_sequences_for_physio(csv_path):
+    """
+    Read hemolysis peptide sequences from a CSV file.
+
+    Expected column:
+        SEQUENCE
+
+    Returns:
+        list[str]
+    """
+    df = pd.read_csv(csv_path)
+
+    if "SEQUENCE" not in df.columns:
+        raise ValueError(
+            f"'SEQUENCE' column not found in {csv_path}. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    sequences = (
+        df["SEQUENCE"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+
+    print(f"Loaded {len(sequences)} sequences from {csv_path}")
+
+    return sequences
 
 
-if __name__ == "__main__":
+def extract_hemolysis_physio_features(sequences):
+    """
+    Extract physicochemical features for hemolysis peptide sequences.
+
+    This method uses the same physicochemical descriptor design
+    as extract_amp_features_full(), but does NOT modify or reuse
+    the existing method.
+
+    Features:
+        1. Global descriptors
+        2. Amino-acid composition
+        3. Eisenberg hydrophobic moment
+        4. Eisenberg global hydrophobicity
+
+    Returns:
+        pd.DataFrame
+            DataFrame containing:
+                SEQUENCE + physicochemical features
+    """
+
+    # --------------------------------------------------------
+    # Clean sequences
+    # --------------------------------------------------------
+    sequences = [
+        str(seq).strip().upper()
+        for seq in sequences
+    ]
+
+    # --------------------------------------------------------
+    # 1. Global descriptors
+    # --------------------------------------------------------
+    glob = GlobalDescriptor(sequences)
+    glob.calculate_all()
+
+    global_df = pd.DataFrame(
+        glob.descriptor,
+        columns=glob.featurenames
+    )
+
+    # --------------------------------------------------------
+    # 2. Amino-acid composition
+    # --------------------------------------------------------
+    pep_base = PeptideDescriptor(sequences)
+
+    pep_base.count_aa()
+
+    aa_df = pd.DataFrame(
+        pep_base.descriptor,
+        columns=pep_base.featurenames
+    )
+
+    # --------------------------------------------------------
+    # 3. Eisenberg hydrophobic moment
+    # --------------------------------------------------------
+    pep_eis = PeptideDescriptor(
+        sequences,
+        "eisenberg"
+    )
+
+    pep_eis.calculate_moment()
+
+    moment_df = pd.DataFrame(
+        pep_eis.descriptor,
+        columns=["Eisenberg_Moment"]
+    )
+
+    # --------------------------------------------------------
+    # 4. Eisenberg global hydrophobicity
+    # --------------------------------------------------------
+    pep_eis.calculate_global()
+
+    global_hydro_df = pd.DataFrame(
+        pep_eis.descriptor,
+        columns=["Eisenberg_Global"]
+    )
+
+    # --------------------------------------------------------
+    # 5. Combine all features
+    # --------------------------------------------------------
+    physio_df = pd.concat(
+        [
+            global_df,
+            aa_df,
+            moment_df,
+            global_hydro_df
+        ],
+        axis=1
+    )
+
+    # Replace invalid/missing values
+    physio_df = physio_df.replace(
+        [np.inf, -np.inf],
+        np.nan
+    ).fillna(0)
+
+    # Add original sequence as first column
+    physio_df.insert(
+        0,
+        "SEQUENCE",
+        sequences
+    )
+
+    print(
+        f"Extracted {physio_df.shape[1] - 1} "
+        f"physicochemical features."
+    )
+
+    print(
+        f"Feature matrix shape: "
+        f"{physio_df.shape}"
+    )
+
+    return physio_df
+
+
+def save_hemolysis_physio_features(
+    cross_val_csv,
+    independent_csv,
+    save_path="data/hemolysis/hemolysis_physio.csv"
+):
+    """
+    Extract physicochemical features from both the hemolysis
+    cross-validation and independent test datasets.
+
+    The two datasets are combined for feature extraction and
+    duplicate sequences are removed while preserving order.
+
+    The resulting features are saved to one CSV file.
+
+    Existing methods are not modified.
+    """
+
+    # --------------------------------------------------------
+    # Read both datasets
+    # --------------------------------------------------------
+    cross_val_sequences = read_hemolysis_sequences_for_physio(
+        cross_val_csv
+    )
+
+    independent_sequences = read_hemolysis_sequences_for_physio(
+        independent_csv
+    )
+
+    # --------------------------------------------------------
+    # Report dataset sizes
+    # --------------------------------------------------------
+    print("\n========================================")
+    print("Hemolysis physicochemical features")
+    print("========================================")
+
+    print(
+        f"Cross-validation sequences : "
+        f"{len(cross_val_sequences)}"
+    )
+
+    print(
+        f"Independent-test sequences : "
+        f"{len(independent_sequences)}"
+    )
+
+    # --------------------------------------------------------
+    # Check sequence overlap
+    # --------------------------------------------------------
+    cross_set = set(cross_val_sequences)
+    independent_set = set(independent_sequences)
+
+    overlap = cross_set.intersection(
+        independent_set
+    )
+
+    if overlap:
+        print(
+            f"WARNING: {len(overlap)} sequences occur "
+            f"in both datasets."
+        )
+    else:
+        print(
+            "No sequence overlap detected."
+        )
+
+    # --------------------------------------------------------
+    # Combine while preserving order
+    # --------------------------------------------------------
+    all_sequences = list(
+        dict.fromkeys(
+            cross_val_sequences +
+            independent_sequences
+        )
+    )
+
+    print(
+        f"Total unique sequences       : "
+        f"{len(all_sequences)}"
+    )
+
+    # --------------------------------------------------------
+    # Extract physicochemical features
+    # --------------------------------------------------------
+    print(
+        "\nExtracting physicochemical features..."
+    )
+
+    physio_df = extract_hemolysis_physio_features(
+        all_sequences
+    )
+
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+    Path(save_path).parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    physio_df.to_csv(
+        save_path,
+        index=False
+    )
+
+    print(
+        f"\nPhysicochemical features saved to:"
+    )
+    print(save_path)
+
+    print(
+        f"Final feature matrix: "
+        f"{physio_df.shape[0]} sequences × "
+        f"{physio_df.shape[1] - 1} features"
+    )
+
+    print(
+        "========================================"
+    )
+
+    return physio_df
+
+
+if __name__ == "__main__0":
     #Ecoli
     input_seq_csv_path='./data/ecoli_clustered_dataset_splits.csv'
     save_path = 'data/phyiochem_ecoli.csv'
 
 
     compute_save_physio_features(input_seq_csv_path, save_path)
+    
+
+if __name__ == "__main__":
+    # --------------------------------------------------------
+    # NEW: Hemolysis physicochemical features
+    # --------------------------------------------------------
+    CROSS_VAL_HEMOLYSIS = (
+        "./data/hemolysis/cross_val_dataset.csv"
+    )
+
+    INDEPENDENT_HEMOLYSIS = (
+        "./data/hemolysis/independent_dataset.csv"
+    )
+
+    HEMOLYSIS_PHYSIO_PATH = (
+        "./data/hemolysis/hemolysis_physio.csv"
+    )
+
+    save_hemolysis_physio_features(
+        cross_val_csv=CROSS_VAL_HEMOLYSIS,
+        independent_csv=INDEPENDENT_HEMOLYSIS,
+        save_path=HEMOLYSIS_PHYSIO_PATH
+    )
     
     
 

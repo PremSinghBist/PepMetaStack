@@ -3,14 +3,21 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from sklearn.model_selection import KFold
+
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.svm import SVR
+from sklearn.pipeline import Pipeline
 from sklearn.ensemble import (
     ExtraTreesRegressor,
     HistGradientBoostingRegressor,
     StackingRegressor,
 )
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.neural_network import MLPRegressor
+
+from xgboost import XGBRegressor
 
 
 
@@ -18,6 +25,8 @@ from sklearn.ensemble import (
 from metrics import Metric
 
 import data_retriever
+
+from gmprot_train import (fused_embed_extraction, get_model_name)
 
 
 
@@ -39,9 +48,10 @@ class StackingRegressionGMProtPipeline:
     # Initialization
     # ==========================================================
 
-    def __init__(self, alpha=10.0, feature_flags=None):
+    def __init__(self, alpha=10.0, feature_flags=None, random_state=42):
 
         self.alpha = alpha
+        self.random_state = random_state
 
         self.feature_flags = (
             feature_flags
@@ -184,8 +194,216 @@ class StackingRegressionGMProtPipeline:
     # ==========================================================
     # 3. Build Stacking Ensemble
     # ==========================================================
-
     def build_stacking_ensemble(self):
+            """
+            Build the stacking regression ensemble.
+    
+            Scaling is included inside the individual pipelines.
+    
+            This is important because StackingRegressor performs
+            internal CV on the outer training data. Each scaler is
+            therefore fitted only on the corresponding inner-training
+            portion.
+    
+            Base estimators:
+    
+                1. Ridge
+                2. SVR
+                3. ExtraTrees
+                4. HistGradientBoosting
+                5. KNN
+                6. MLP
+                7. XGBoost
+    
+            Meta learner:
+    
+                RidgeCV
+            """
+    
+            base_estimators = [
+    
+                # ----------------------------------------------------
+                # Ridge
+                # ----------------------------------------------------
+    
+                (
+                    "ridge",
+                    Pipeline(
+                        [
+                            (
+                                "scaler",
+                                StandardScaler(),
+                            ),
+                            (
+                                "model",
+                                Ridge(
+                                    alpha=10.0,
+                                ),
+                            ),
+                        ]
+                    ),
+                ),
+    
+                # ----------------------------------------------------
+                # SVR
+                # ----------------------------------------------------
+    
+                (
+                    "svr",
+                    Pipeline(
+                        [
+                            (
+                                "scaler",
+                                StandardScaler(),
+                            ),
+                            (
+                                "model",
+                                SVR(
+                                    C=10.0,
+                                    epsilon=0.1,
+                                    kernel="rbf",
+                                ),
+                            ),
+                        ]
+                    ),
+                ),
+    
+                # ----------------------------------------------------
+                # Extra Trees
+                # ----------------------------------------------------
+    
+                (
+                    "extra_trees",
+                    ExtraTreesRegressor(
+                        n_estimators=150,
+                        max_depth=16,
+                        random_state=self.random_state,
+                        n_jobs=-1,
+                    ),
+                ),
+    
+                # ----------------------------------------------------
+                # HistGradientBoosting
+                # ----------------------------------------------------
+    
+                (
+                    "hist_gb",
+                    HistGradientBoostingRegressor(
+                        max_iter=150,
+                        l2_regularization=1.0,
+                        random_state=self.random_state,
+                    ),
+                ),
+    
+                # ----------------------------------------------------
+                # KNN
+                # ----------------------------------------------------
+    
+                (
+                    "knn",
+                    Pipeline(
+                        [
+                            (
+                                "scaler",
+                                StandardScaler(),
+                            ),
+                            (
+                                "model",
+                                KNeighborsRegressor(
+                                    n_neighbors=7,
+                                    weights="distance",
+                                    metric="cosine",
+                                    n_jobs=-1,
+                                ),
+                            ),
+                        ]
+                    ),
+                ),
+    
+                # ----------------------------------------------------
+                # MLP
+                # ----------------------------------------------------
+    
+                (
+                    "mlp",
+                    Pipeline(
+                        [
+                            (
+                                "scaler",
+                                StandardScaler(),
+                            ),
+                            (
+                                "model",
+                                MLPRegressor(
+                                    hidden_layer_sizes=(
+                                        128,
+                                        64,
+                                    ),
+                                    activation="relu",
+                                    alpha=0.01,
+                                    max_iter=300,
+                                    early_stopping=True,
+                                    random_state=self.random_state,
+                                ),
+                            ),
+                        ]
+                    ),
+                ),
+    
+                # ----------------------------------------------------
+                # XGBoost
+                # ----------------------------------------------------
+    
+                (
+                    "xgb",
+                    XGBRegressor(
+                        n_estimators=150,
+                        max_depth=5,
+                        learning_rate=0.05,
+                        subsample=0.8,
+                        colsample_bytree=0.8,
+                        random_state=self.random_state,
+                        n_jobs=-1,
+                    ),
+                ),
+            ]
+    
+            # ========================================================
+            # Meta learner
+            # ========================================================
+    
+            meta_learner = RidgeCV(
+                alphas=np.logspace(
+                    -3,
+                    3,
+                    15,
+                )
+            )
+    
+            # ========================================================
+            # Internal CV for stacking
+            # ========================================================
+    
+            internal_cv = KFold(
+                n_splits=5,
+                shuffle=True,
+                random_state=self.random_state,
+            )
+    
+            # ========================================================
+            # Stacking model
+            # ========================================================
+    
+            stacking_model = StackingRegressor(
+                estimators=base_estimators,
+                final_estimator=meta_learner,
+                cv=internal_cv,
+                n_jobs=-1,
+            )
+    
+            return stacking_model
+
+    def build_stacking_ensemble_old(self):
 
         base_estimators = [
 
@@ -374,25 +592,28 @@ class StackingRegressionGMProtPipeline:
         )
 
         return df_weights
+    
+    
 
     # ==========================================================
-    # 5. Run Fold 1
+    # 5. Run One Fold
     # ==========================================================
 
     def run_fold(
         self,
         data_splits,
-        metric_evaluator=None,
-        fold_index=1,
+        metric_evaluator: Metric=None,
+        fold_index=None,
     ):
         """
         Train and evaluate the stacking model on one CV fold.
 
-        Fold 1:
+        Fold None:
             train -> data_splits["train"]
             val   -> data_splits["val"]
             test  -> data_splits["test"]
         """
+        
 
         print(
             f"\n{'=' * 60}"
@@ -405,6 +626,9 @@ class StackingRegressionGMProtPipeline:
         print(
             f"{'=' * 60}"
         )
+        
+        val_metrics = None
+        test_metrics = None
 
         # ======================================================
         # Prepare Data
@@ -549,6 +773,287 @@ class StackingRegressionGMProtPipeline:
             "val_predictions": val_preds,
             "test_predictions": test_preds,
         }
+    
+    # ==========================================================
+    # 6. Run All Five Folds
+    # ==========================================================
+
+    def run_all_folds(
+        self,
+        model_name,
+        metric_evaluator,
+        blosum_csv,
+        physio_csv,
+        sinusoidal_csv,
+        dataset_csv,
+        result_csv="./results/stacking_five_fold_results.csv",
+    ):
+        """
+        Train and evaluate the stacking model across five CV folds.
+
+        For each fold:
+            1. Load the corresponding GMProt model.
+            2. Extract fold-specific fused embeddings.
+            3. Load train/validation/test data.
+            4. Train the stacking regression model.
+            5. Predict on the fixed test set.
+            6. Compute test metrics.
+
+        Finally:
+            - Save per-fold test results.
+            - Compute mean and standard deviation across folds.
+            - Save the complete results to CSV.
+
+        Parameters
+        ----------
+        model_name : str
+            Base GMProt model name, e.g. "GMProt_Experiment".
+
+        metric_evaluator :
+            Metric object used to compute RMSE, Kendall, Pearson,
+            and R2.
+
+        blosum_csv : str
+            Path to BLOSUM feature CSV.
+
+        physio_csv : str
+            Path to physicochemical feature CSV.
+
+        sinusoidal_csv : str
+            Path to sinusoidal feature CSV.
+
+        dataset_csv : str
+            Path to five-fold dataset CSV.
+
+        result_csv : str
+            Output CSV path.
+        """
+
+        # ------------------------------------------------------
+        # Check output directory
+        # ------------------------------------------------------
+
+        result_dir = os.path.dirname(result_csv)
+
+        if result_dir:
+            os.makedirs(
+                result_dir,
+                exist_ok=True,
+            )
+
+        # ------------------------------------------------------
+        # Store results from each fold
+        # ------------------------------------------------------
+
+        fold_results = []
+
+        # ------------------------------------------------------
+        # Run folds 1 -> 5
+        # ------------------------------------------------------
+
+        for fold_index in [1, 2, 3, 4, 5]:
+
+            print(
+                "\n"
+                + "=" * 80
+            )
+
+            print(
+                f"STARTING FOLD {fold_index}/5"
+            )
+
+            print(
+                "=" * 80
+            )
+
+            # ==================================================
+            # Load fold-specific GMProt model
+            # ==================================================
+
+            gmprot_model_name = get_model_name(
+                model_name=model_name,
+                fold_index=fold_index,
+            )
+
+            gmprot_path = (
+                f"./model/{gmprot_model_name}"
+            )
+
+            print(
+                f"\nGMProt Model Path: "
+                f"{gmprot_path}"
+            )
+
+            # ==================================================
+            # Extract fold-specific GMProt embeddings
+            # ==================================================
+
+            fused_embeddings = (
+                fused_embed_extraction(
+                    gmprot_path
+                )
+            )
+
+            print(
+                f"Extracted GMProt embeddings "
+                f"for fold {fold_index}"
+            )
+
+            # ==================================================
+            # Load fold-specific data split
+            # ==================================================
+
+            data_splits = data_retriever.load_features(
+                fused_embeddings=fused_embeddings,
+
+                blosum_csv=blosum_csv,
+
+                physio_csv=physio_csv,
+
+                sinusoidal_csv=sinusoidal_csv,
+
+                dataset_csv=dataset_csv,
+
+                fold_index=fold_index,
+            )
+
+            # ==================================================
+            # Train + evaluate this fold
+            # ==================================================
+
+            results = self.run_fold(
+                data_splits=data_splits,
+
+                metric_evaluator=metric_evaluator,
+
+                fold_index=fold_index,
+            )
+
+            # ==================================================
+            # Extract test metrics
+            # ==================================================
+
+            test_metrics = results["test_metrics"]
+
+            fold_result = {
+                "Fold": fold_index,
+            }
+
+            # --------------------------------------------------
+            # Add all test metrics
+            # --------------------------------------------------
+
+            for metric_name, metric_value in test_metrics.items():
+
+                fold_result[metric_name] = float(
+                    metric_value
+                )
+
+            fold_results.append(
+                fold_result
+            )
+
+        # ======================================================
+        # Convert fold results to DataFrame
+        # ======================================================
+
+        results_df = pd.DataFrame(
+            fold_results
+        )
+
+        # ======================================================
+        # Calculate Mean
+        # ======================================================
+
+        mean_row = {
+            "Fold": "Mean",
+        }
+
+        for column in results_df.columns:
+
+            if column == "Fold":
+                continue
+
+            mean_row[column] = (
+                results_df[column].mean()
+            )
+
+        # ======================================================
+        # Calculate Standard Deviation
+        # ======================================================
+
+        std_row = {
+            "Fold": "Std",
+        }
+
+        for column in results_df.columns:
+
+            if column == "Fold":
+                continue
+
+            std_row[column] = (
+                results_df[column].std(
+                    ddof=1
+                )
+            )
+
+        # ======================================================
+        # Append Mean + Std
+        # ======================================================
+
+        summary_df = pd.DataFrame(
+            [
+                mean_row,
+                std_row,
+            ]
+        )
+
+        final_results_df = pd.concat(
+            [
+                results_df,
+                summary_df,
+            ],
+            ignore_index=True,
+        )
+
+        # ======================================================
+        # Save Results
+        # ======================================================
+
+        final_results_df.to_csv(
+            result_csv,
+            index=False,
+        )
+
+        # ======================================================
+        # Print Summary
+        # ======================================================
+
+        print(
+            "\n"
+            + "=" * 80
+        )
+
+        print(
+            "FIVE-FOLD TEST RESULTS"
+        )
+
+        print(
+            "=" * 80
+        )
+
+        print(
+            final_results_df.to_string(
+                index=False
+            )
+        )
+
+        print(
+            f"\nResults saved to:"
+            f"\n{result_csv}"
+        )
+
+        return final_results_df
 
 
 # ==============================================================
@@ -558,27 +1063,10 @@ class StackingRegressionGMProtPipeline:
 if __name__ == "__main__":
 
     # ==========================================================
-    # Dataset / Feature Files
+    # Model Configuration
     # ==========================================================
 
-    data_splits = data_retriever.load_features(
-        fused_embedding_file=(
-            "./data/gmprot_ecoli_fusion_embeddings.npy"
-        ),
-        blosum_csv=(
-            "./data/ecoli_blosum62_features.csv"
-        ),
-        physio_csv=(
-            "./data/ecoli_phyiochem.csv"
-        ),
-        sinusoidal_csv=(
-            "./data/ecoli_sinusoidal_encoding.csv"
-        ),
-        dataset_csv=(
-            "./data/ecoli_five_fold_dataset.csv"
-        ),
-        fold_index=3,
-    )
+    model_name = "GMProt_Experiment"
 
     # ==========================================================
     # Metric
@@ -595,14 +1083,36 @@ if __name__ == "__main__":
     pipeline = StackingRegressionGMProtPipeline(
         alpha=10.0,
         feature_flags=FEATURE_FLAGS,
+        random_state=42
     )
 
     # ==========================================================
-    # Run Fold 1
+    # Run All Five Folds
     # ==========================================================
 
-    results = pipeline.run_fold(
-        data_splits=data_splits,
+    results_df = pipeline.run_all_folds(
+        model_name=model_name,
+
         metric_evaluator=metric,
-        fold_index=1,
+
+        blosum_csv=(
+            "./data/ecoli_blosum62_features.csv"
+        ),
+
+        physio_csv=(
+            "./data/ecoli_phyiochem.csv"
+        ),
+
+        sinusoidal_csv=(
+            "./data/ecoli_sinusoidal_encoding.csv"
+        ),
+
+        dataset_csv=(
+            "./data/ecoli_five_fold_dataset.csv"
+        ),
+
+        result_csv=(
+            "./results/"
+            "stacking_gmprot_fusion_five_fold_results_extended_XGBoost.csv"
+        ),
     )

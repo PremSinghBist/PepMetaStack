@@ -28,5 +28,6 @@ TM-Vec
 -----
 Visualization to make:
 normalized performance heatmap
+Line chart for : showing model improvement
 
 

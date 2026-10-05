@@ -170,7 +170,235 @@ def extract_onehot_encoding(sequences:list):
 
     return onehot_global
 
-if __name__ == "__main__":
+# --------------------------------------------------
+# Hemolysis-specific positional encoding
+# --------------------------------------------------
+
+def read_hemolysis_sequences_for_position_encoding(csv_path):
+    """
+    Read hemolysis peptide sequences from CSV.
+
+    The input CSV must contain a column named 'SEQUENCE'.
+    """
+    df = pd.read_csv(csv_path)
+
+    if "SEQUENCE" not in df.columns:
+        raise ValueError(
+            f"'SEQUENCE' column not found in {csv_path}. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    sequences = (
+        df["SEQUENCE"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+
+    print(f"Loaded {len(sequences)} sequences from {csv_path}")
+
+    return sequences
+
+
+def extract_hemolysis_position_encoding(sequences):
+    """
+    Extract global sinusoidal positional encodings for
+    hemolysis peptide sequences.
+
+    Each sequence is represented by a single global positional
+    encoding vector obtained by averaging valid positional
+    encodings across its residues.
+
+    Returns:
+        pe_global : np.ndarray of shape (N, d)
+        sequences : list of sequences
+    """
+
+    sequences = [
+        str(seq).strip().upper()
+        for seq in sequences
+    ]
+
+    # --------------------------------------------------
+    # Step 1: Generate residue-level positional encodings
+    # --------------------------------------------------
+    pe_list = []
+
+    for seq in sequences:
+        pe = sinusoidal_position_encoding(
+            len(seq),
+            cfg.sinusoidal_feature_dim
+        )
+        pe_list.append(pe)
+
+    # --------------------------------------------------
+    # Step 2: Pad to common maximum sequence length
+    # --------------------------------------------------
+    pe_padded, pe_mask = pad_positional_encodings(
+        pe_list,
+        max_len=cfg.seq_max_len
+    )
+
+    # --------------------------------------------------
+    # Step 3: Global average pooling
+    # --------------------------------------------------
+    pe_global = positional_encoding_global(
+        pe_padded,
+        pe_mask
+    )
+
+    print(
+        f"Token PE shape   : {pe_padded.shape}"
+    )
+    print(
+        f"Global PE shape  : {pe_global.shape}"
+    )
+
+    return pe_global, sequences
+
+
+def save_hemolysis_position_encoding(
+    cross_val_csv,
+    independent_csv,
+    save_path="data/hemolysis/hemolysis_sinusoidal_encoding.csv"
+):
+    """
+    Compute and save global sinusoidal positional encodings
+    for both hemolysis cross-validation and independent-test
+    datasets.
+
+    The output contains:
+        SEQUENCE
+        pe_0
+        pe_1
+        ...
+        pe_(d-1)
+    """
+
+    # --------------------------------------------------
+    # Read sequences
+    # --------------------------------------------------
+    cross_val_sequences = (
+        read_hemolysis_sequences_for_position_encoding(
+            cross_val_csv
+        )
+    )
+
+    independent_sequences = (
+        read_hemolysis_sequences_for_position_encoding(
+            independent_csv
+        )
+    )
+
+    print("\n========================================")
+    print("Hemolysis positional encoding")
+    print("========================================")
+
+    print(
+        f"Cross-validation sequences : "
+        f"{len(cross_val_sequences)}"
+    )
+
+    print(
+        f"Independent-test sequences : "
+        f"{len(independent_sequences)}"
+    )
+
+    # --------------------------------------------------
+    # Check overlap
+    # --------------------------------------------------
+    cross_set = set(cross_val_sequences)
+    independent_set = set(independent_sequences)
+
+    overlap = cross_set.intersection(
+        independent_set
+    )
+
+    if overlap:
+        print(
+            f"WARNING: {len(overlap)} sequences occur "
+            f"in both datasets."
+        )
+    else:
+        print("No sequence overlap detected.")
+
+    # --------------------------------------------------
+    # Combine while preserving order
+    # --------------------------------------------------
+    all_sequences = list(
+        dict.fromkeys(
+            cross_val_sequences +
+            independent_sequences
+        )
+    )
+
+    print(
+        f"Total unique sequences       : "
+        f"{len(all_sequences)}"
+    )
+
+    # --------------------------------------------------
+    # Extract positional encodings
+    # --------------------------------------------------
+    print("\nExtracting sinusoidal positional encodings...")
+
+    pe_global, processed_sequences = (
+        extract_hemolysis_position_encoding(
+            all_sequences
+        )
+    )
+
+    # --------------------------------------------------
+    # Build DataFrame
+    # --------------------------------------------------
+    d = pe_global.shape[1]
+
+    col_names = [
+        f"pe_{i}"
+        for i in range(d)
+    ]
+
+    features_df = pd.DataFrame(
+        pe_global,
+        columns=col_names
+    )
+
+    features_df.insert(
+        0,
+        "SEQUENCE",
+        processed_sequences
+    )
+
+    # --------------------------------------------------
+    # Save
+    # --------------------------------------------------
+    from pathlib import Path
+
+    Path(save_path).parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    features_df.to_csv(
+        save_path,
+        index=False
+    )
+
+    print("\nPositional encodings saved to:")
+    print(save_path)
+
+    print(
+        f"Final feature matrix: "
+        f"{features_df.shape[0]} sequences × "
+        f"{features_df.shape[1] - 1} features"
+    )
+
+    print("========================================")
+
+    return features_df
+
+if __name__ == "__main__0":
     #Ecoli
     save_path = './data/ecoli_sinusoidal_encoding.csv'
     pe_global, sequences = extract_position_encoding('./data/ecoli_clustered_dataset_splits.csv')
@@ -179,3 +407,26 @@ if __name__ == "__main__":
     # To load later:
     # encoding_dict = load_sinusoidal_encoding(sinusoidal_encoding_path)
     
+
+if __name__ == "__main__":
+    # ==================================================
+    # NEW: Hemolysis positional encoding
+    # ==================================================
+
+    CROSS_VAL_HEMOLYSIS = (
+        "./data/hemolysis/cross_val_dataset.csv"
+    )
+
+    INDEPENDENT_HEMOLYSIS = (
+        "./data/hemolysis/independent_dataset.csv"
+    )
+
+    HEMOLYSIS_PE_PATH = (
+        "./data/hemolysis/hemolysis_sinusoidal_encoding.csv"
+    )
+
+    save_hemolysis_position_encoding(
+        cross_val_csv=CROSS_VAL_HEMOLYSIS,
+        independent_csv=INDEPENDENT_HEMOLYSIS,
+        save_path=HEMOLYSIS_PE_PATH
+    )

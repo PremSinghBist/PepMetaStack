@@ -4,5 +4,78 @@ Vanial GMProt Performance on Escheleria coli:
   R2: 0.5114
   Pearson: 0.7256
   Kendall: 0.5065
+  
 
   ---------------------
+
+  I have sequences 4,793 sequences.    
+  training (3,259), validation (815), and test (719)
+
+  I have the csv as:
+  bacterium,modifications,sequence,strain,unit,url_source,is_modified,has_unusual_modification,has_cterminal_amidation,datasource_has_modifications,database,value,cluster_id,split,cv_fold
+  
+  For this, I would like to have split this dataset in fivefold cross validation dataset.
+  How to do it. What is the recommended approach? Should test dataset also be included and suffled from the complete
+  dataset or what should be the appraoch.
+  My dataset is in excelsheet. 
+
+----
+
+BERT ─────┐
+          ├── Concatenate ── PCA ── Z
+CLIP ─────┘
+
+-------------- PCA learns a shared compression space. -----------
+BERT ── PCA ──┐
+              ├── concatenate
+CLIP ── PCA ──┘
+
+
+---------------------
+        Representation
+              ↓
+      Dimensionality reduction
+              ↓
+           Fusion
+              ↓
+       Recommendation
+--------------------
+feature-level concatenation.
+-----------
+
+                 Same peptide sequence
+                         │
+             ┌───────────┴───────────┐
+             ▼                       ▼
+        ProtT5 embeddings        ESM2 embeddings
+        L × 1024                  L × 1280
+             │                       │
+             ▼                       ▼
+       Linear → 1024            Linear → 1024
+             │                       │
+             ▼                       ▼
+          LayerNorm              LayerNorm
+             │                       │
+             └───────────┬───────────┘
+                         │
+                         ▼
+                  Cross Fusion
+                         │
+             ProtT5 = Q / ESM2 = K,V
+                         │
+                         ▼
+                  Fused sequence
+                  L × 1024
+                         │
+                         ▼
+                 Transformer Decoder
+                         │
+                         ▼
+                Amino-acid prediction
+                         │
+                         ▼
+              Sequence reconstruction
+                         │
+                         ▼
+                 Cross-Entropy Loss
+                 
