@@ -31,3 +31,36 @@ normalized performance heatmap
 Line chart for : showing model improvement
 
 
+---pefeature computation ---------
+CSV file
+   │
+   ▼
+Read "sequence"
+   │
+   ▼
+Clean + validate sequences
+   │
+   ▼
+Limit sequence length to ≤128 aa
+   │
+   ▼
+Write temporary sequence file
+   │
+   ▼
+HemoPI2 / Pfeature extractor
+   │
+   ▼
+Multiple sequence descriptors
+   │
+   ▼
+Concatenated Pfeature vector
+   │
+   ▼
+Validate numeric matrix
+   │
+   ▼
+Build dictionary
+sequence → feature vector
+   │
+   ▼
+Save as .npy

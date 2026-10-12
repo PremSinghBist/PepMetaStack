@@ -1,7 +1,8 @@
+#!/usr/bin/env python3
+from pathlib import Path
 import os
 import numpy as np
 import pandas as pd
-
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.linear_model import Ridge, RidgeCV
@@ -15,82 +16,12 @@ from sklearn.ensemble import (
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.neural_network import MLPRegressor
 from xgboost import XGBRegressor
-
 from metrics import Metric
 import data_util
-import physiochem_feature_extractor
-import blosum62
-import position_encoding_extractor
 
-
-# ============================================================
-# Stacking Regression Pipeline
-# ============================================================
 
 class StackingRegressionPipeline:
-
-    """
-    Generic stacking regression pipeline for protein sequence features.
-
-    The pipeline supports:
-
-        - ProtT5
-        - Fine-tuned ProtT5
-        - ESM2
-        - Pre-computed fusion embeddings
-        - Multiple embedding sources simultaneously
-        - Physicochemical features
-        - BLOSUM62 features
-        - Sinusoidal positional features
-
-    Examples
-    --------
-    Pure ProtT5:
-
-        embedding_files = {
-            "prott5": "prott5.npz"
-        }
-
-        embedding_sources = ["prott5"]
-
-
-    Fine-tuned ProtT5:
-
-        embedding_files = {
-            "ft_prott5": "ft_prott5.npz"
-        }
-
-        embedding_sources = ["ft_prott5"]
-
-
-    ProtT5 + ESM2:
-
-        embedding_files = {
-            "prott5": "prott5.npz",
-            "esm2": "esm2.npz"
-        }
-
-        embedding_sources = [
-            "prott5",
-            "esm2"
-        ]
-
-
-    Pre-computed fusion embedding:
-
-        embedding_files = {
-            "fusion": "fusion.npz"
-        }
-
-        embedding_sources = ["fusion"]
-
-    Handcrafted features are added automatically when their
-    corresponding paths are supplied to the constructor.
-    """
-
-    # ========================================================
-    # 1. INITIALIZATION
-    # ========================================================
+    """Stacking regression with explicitly enabled sequence features."""
 
     def __init__(
         self,
@@ -99,158 +30,207 @@ class StackingRegressionPipeline:
         blosum_path=None,
         sinu_path=None,
         random_state=42,
+        *,
+        pfeature_path=None,
+        use_physio=False,
+        use_blosum=False,
+        use_sinusoidal=False,
+        use_pfeature=False,
     ):
+        """Flags alone enable extra features. Disabled paths are ignored.
 
+        Pfeature files must be trusted .npy files containing a scalar dictionary
+        mapping exact sequence strings to nonempty, finite 1D numeric vectors.
+        Embedding selection remains controlled by embedding_sources at run time.
+        """
         self.random_state = random_state
-
-        # ----------------------------------------------------
-        # Load embedding files
-        # ----------------------------------------------------
-
+        self._dimensions = {}
         self.embeddings = {}
-
+        self.feature_flags = dict(
+            physio=use_physio,
+            blosum=use_blosum,
+            sinusoidal=use_sinusoidal,
+            pfeature=use_pfeature,
+        )
+        self.feature_paths = dict(
+            physio=physio_path,
+            blosum=blosum_path,
+            sinusoidal=sinu_path,
+            pfeature=pfeature_path,
+        )
+        for name, flag in self.feature_flags.items():
+            if type(flag) is not bool:
+                raise TypeError(f"use_{name} must be True or False.")
+        self.use_physio = use_physio
+        self.use_blosum = use_blosum
+        self.use_sinusoidal = use_sinusoidal
+        self.use_pfeature = use_pfeature
         for name, path in (embedding_files or {}).items():
+            self._require_file(path, f"Embedding {name}")
+            self.embeddings[name] = self._validate_mapping(
+                data_util.load_embeddings(path), f"embedding:{name}", pooled=True
+            )
+        self.extra_features = {}
+        for name, enabled in self.feature_flags.items():
+            if not enabled:
+                continue
+            path = self.feature_paths[name]
+            self._require_file(path, name)
+            if name == "physio":
+                import physiochem_feature_extractor
 
-            if not os.path.exists(path):
-                raise FileNotFoundError(
-                    f"Embedding file not found: {path}"
+                mapping = (
+                    physiochem_feature_extractor.load_physio_features_as_numpy_all(path)
                 )
+            elif name == "blosum":
+                import blosum62
 
-            print(
-                f"Loading embedding [{name}]: {path}"
+                mapping = blosum62.load_blosum62_features(path)
+            elif name == "sinusoidal":
+                import position_encoding_extractor
+
+                mapping = position_encoding_extractor.load_sinusoidal_encoding(path)
+            else:
+                if Path(path).suffix.lower() != ".npy":
+                    raise ValueError("pfeature_path must reference a .npy file.")
+                stored = np.load(path, allow_pickle=True)
+                if not isinstance(stored, np.ndarray) or stored.shape != ():
+                    raise ValueError("Pfeature .npy must contain a scalar dictionary.")
+                mapping = stored.item()
+            self.extra_features[name] = self._validate_mapping(
+                mapping, name, strict_vector=name == "pfeature"
             )
-
-            self.embeddings[name] = (
-                data_util.load_embeddings(path)
-            )
-
-        # ----------------------------------------------------
-        # Load optional handcrafted features
-        # ----------------------------------------------------
-
-        self.physio_features = None
-        self.blosum_features = None
-        self.sinu_features = None
-
-        if physio_path is not None:
-
-            if not os.path.exists(physio_path):
-                raise FileNotFoundError(
-                    f"Physicochemical feature file not found: "
-                    f"{physio_path}"
-                )
-
-            print(
-                f"Loading physicochemical features: "
-                f"{physio_path}"
-            )
-
-            self.physio_features = (
-                physiochem_feature_extractor
-                .load_physio_features_as_numpy_all(
-                    physio_path
-                )
-            )
-
-        if blosum_path is not None:
-
-            if not os.path.exists(blosum_path):
-                raise FileNotFoundError(
-                    f"BLOSUM feature file not found: "
-                    f"{blosum_path}"
-                )
-
-            print(
-                f"Loading BLOSUM62 features: "
-                f"{blosum_path}"
-            )
-
-            self.blosum_features = (
-                blosum62.load_blosum62_features(
-                    blosum_path
-                )
-            )
-
-        if sinu_path is not None:
-
-            if not os.path.exists(sinu_path):
-                raise FileNotFoundError(
-                    f"Sinusoidal feature file not found: "
-                    f"{sinu_path}"
-                )
-
-            print(
-                f"Loading sinusoidal features: "
-                f"{sinu_path}"
-            )
-
-            self.sinu_features = (
-                position_encoding_extractor
-                .load_sinusoidal_encoding(
-                    sinu_path
-                )
-            )
-
+        self.physio_features = self.extra_features.get("physio")
+        self.blosum_features = self.extra_features.get("blosum")
+        self.sinu_features = self.extra_features.get("sinusoidal")
+        self.pfeature_features = self.extra_features.get("pfeature")
         self._print_configuration()
 
-    # ========================================================
-    # 2. CONFIGURATION
-    # ========================================================
+    @staticmethod
+    def _require_file(path, name):
+        if path is None or not str(path).strip():
+            raise ValueError(f"{name} is enabled but its path is missing.")
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"{name} file not found: {path}")
+
+    def _validate_mapping(self, mapping, name, pooled=False, strict_vector=False):
+        from collections.abc import Mapping
+
+        if not isinstance(mapping, Mapping) or not mapping:
+            raise ValueError(
+                f"{name}: expected a nonempty sequence-to-feature mapping."
+            )
+        dimension = None
+        validated = {}
+        for sequence, value in mapping.items():
+            if not isinstance(sequence, str) or not sequence.strip():
+                raise ValueError(f"{name}: keys must be nonempty sequence strings.")
+            try:
+                arr = np.asarray(value, dtype=np.float32)
+            except (ValueError, TypeError, OverflowError) as exc:
+                raise ValueError(
+                    f"{name}: nonnumeric features for {sequence!r}."
+                ) from exc
+            if arr.size == 0 or not np.isfinite(arr).all():
+                raise ValueError(
+                    f"{name}: empty or nonfinite features for {sequence!r}."
+                )
+            if strict_vector and arr.ndim != 1:
+                raise ValueError(
+                    f"{name}: expected 1D vector for {sequence!r}, got {arr.shape}."
+                )
+            vector = self.mean_pool(arr) if pooled else arr.ravel()
+            if dimension is None:
+                dimension = vector.size
+            if vector.size != dimension:
+                raise ValueError(
+                    f"{name}: inconsistent dimensions for {sequence!r}: {vector.size}, expected {dimension}."
+                )
+            validated[sequence] = vector
+        self._dimensions[name] = dimension
+        return validated
 
     def _print_configuration(self):
-
         print("\n" + "=" * 70)
-        print("STACKING REGRESSION PIPELINE")
+        print("STACKING REGRESSION FEATURE CONFIGURATION")
+        for name, mapping in self.embeddings.items():
+            print(
+                f"Embedding {name}: {len(mapping)} sequences; {self._dimensions['embedding:' + name]} pooled dimensions"
+            )
+        print("Embeddings used are selected by embedding_sources for each run.")
+        for name, enabled in self.feature_flags.items():
+            detail = (
+                f"path={self.feature_paths[name]}; dimensions={self._dimensions[name]}"
+                if enabled
+                else "path ignored"
+            )
+            print(f"{name}: {('ON' if enabled else 'OFF')}; {detail}")
+        print(
+            "Order: selected embeddings, physicochemical, BLOSUM62, sinusoidal, Pfeature."
+        )
+        print("Outer CV=5; inner stacking CV=5; final fit=full development; test=once.")
         print("=" * 70)
 
-        print(
-            "\nEmbedding sources loaded:"
-        )
+    def get_extra_features(self, sequence):
+        features = []
+        for name, mapping in self.extra_features.items():
+            if sequence not in mapping:
+                raise KeyError(f"{name}: sequence missing: {sequence!r}")
+            features.append(mapping[sequence])
+        return features
 
-        if self.embeddings:
-
-            for name, embedding in self.embeddings.items():
-
-                print(
-                    f"  - {name:<15} "
-                    f"{len(embedding):>6} sequences"
+    def prepare_split(self, dataset_split, embedding_sources, pooling="mean"):
+        if not isinstance(dataset_split, pd.DataFrame):
+            raise TypeError("dataset_split must be a pandas DataFrame.")
+        if not {"sequence", "value"}.issubset(dataset_split.columns):
+            raise ValueError("Dataset requires sequence and value columns.")
+        if dataset_split.empty:
+            raise ValueError("Dataset split is empty.")
+        if dataset_split["sequence"].isna().any():
+            raise ValueError("Dataset contains missing sequences.")
+        sequences = dataset_split["sequence"].tolist()
+        if any((not isinstance(s, str) or not s.strip() for s in sequences)):
+            raise ValueError(
+                "Sequences must be nonempty strings matching feature keys exactly."
+            )
+        if isinstance(embedding_sources, str):
+            raise TypeError("embedding_sources must be a list of source names.")
+        if not embedding_sources or len(set(embedding_sources)) != len(
+            embedding_sources
+        ):
+            raise ValueError("embedding_sources must be nonempty with no duplicates.")
+        for source in embedding_sources:
+            if source not in self.embeddings:
+                raise ValueError(f"Unknown embedding source: {source}")
+        selected = [(f"embedding:{s}", self.embeddings[s]) for s in embedding_sources]
+        selected.extend(self.extra_features.items())
+        for name, mapping in selected:
+            missing = sorted(set(sequences) - mapping.keys())
+            if missing:
+                raise KeyError(
+                    f"{name}: missing {len(missing)} sequences; examples: {missing[:5]}"
                 )
-
-        else:
-
-            print("  None")
-
-        print("\nAdditional features:")
-
-        print(
-            f"  - Physicochemical : "
-            f"{self.physio_features is not None}"
+        y = pd.to_numeric(dataset_split["value"], errors="raise").to_numpy(
+            dtype=np.float32
         )
-
-        print(
-            f"  - BLOSUM62        : "
-            f"{self.blosum_features is not None}"
+        if not np.isfinite(y).all():
+            raise ValueError("Targets must be finite numeric values.")
+        X = np.stack(
+            [self.get_features(s, embedding_sources, pooling) for s in sequences]
         )
-
-        print(
-            f"  - Sinusoidal      : "
-            f"{self.sinu_features is not None}"
-        )
-
-        print("=" * 70)
-
-    # ========================================================
-    # 3. EMBEDDING POOLING
-    # ========================================================
+        print(f"Selected embeddings: {embedding_sources}; feature matrix: {X.shape}")
+        return (X, y)
 
     @staticmethod
     def mean_pool(arr):
-
         """
+
         Mean-pool residue-level embeddings.
 
         Parameters
+
         ----------
+
         arr : np.ndarray
 
             Either:
@@ -262,169 +242,96 @@ class StackingRegressionPipeline:
                 (embedding_dim,)
 
         Returns
+
         -------
+
         np.ndarray
 
             Shape:
 
                 (embedding_dim,)
+
         """
-
-        arr = np.asarray(
-            arr,
-            dtype=np.float32,
-        )
-
-        # Already pooled
+        arr = np.asarray(arr, dtype=np.float32)
         if arr.ndim == 1:
             return arr
-
-        # Residue-level embedding
         if arr.ndim == 2:
-
-            return np.mean(
-                arr,
-                axis=0,
-            ).astype(np.float32)
-
+            return np.mean(arr, axis=0).astype(np.float32)
         raise ValueError(
-            "Expected embedding to be 1D or 2D, "
-            f"but received shape {arr.shape}"
+            f"Expected embedding to be 1D or 2D, but received shape {arr.shape}"
         )
 
-    # ========================================================
-    # 4. GET EMBEDDING
-    # ========================================================
-
-    def get_embedding(
-        self,
-        sequence,
-        source,
-        pooling="mean",
-    ):
-
+    def get_embedding(self, sequence, source, pooling="mean"):
         """
+
         Retrieve and pool an embedding for one sequence.
 
         Parameters
+
         ----------
+
         sequence : str
+
             Protein sequence.
 
         source : str
+
             Embedding source name.
 
         pooling : str
+
             Currently only "mean".
 
         Returns
+
         -------
+
         np.ndarray
+
             Pooled embedding.
+
         """
-
         if source not in self.embeddings:
-
             raise ValueError(
-                f"Embedding source '{source}' is not loaded.\n"
-                f"Available sources: "
-                f"{list(self.embeddings.keys())}"
+                f"Embedding source '{source}' is not loaded.\nAvailable sources: {list(self.embeddings.keys())}"
             )
-            
-        print(f"Embedding source used for trainin is : {source}")
         embedding_dict = self.embeddings[source]
-
         if sequence not in embedding_dict:
-
             raise KeyError(
-                f"Sequence not found in "
-                f"'{source}' embedding file:\n"
-                f"{sequence}"
+                f"Sequence not found in '{source}' embedding file:\n{sequence}"
             )
-
         embedding = embedding_dict[sequence]
-
         if pooling != "mean":
-
             raise ValueError(
-                f"Unsupported pooling method: {pooling}. "
-                "Currently only 'mean' is supported."
+                f"Unsupported pooling method: {pooling}. Currently only 'mean' is supported."
             )
-
         return self.mean_pool(embedding)
 
-    # ========================================================
-    # 5. GET ADDITIONAL FEATURES
-    # ========================================================
-
-    def get_extra_features(self, sequence):
-
-        """
-        Retrieve all optional handcrafted features.
-
-        Returns
-        -------
-        list[np.ndarray]
-            List of feature vectors.
+    def get_features(self, sequence, embedding_sources, pooling="mean"):
         """
 
-        features = []
-
-        feature_sources = [
-            self.physio_features,
-            self.blosum_features,
-            self.sinu_features,
-        ]
-
-        for feature_dict in feature_sources:
-
-            if feature_dict is None:
-                continue
-
-            if sequence not in feature_dict:
-
-                raise KeyError(
-                    "Sequence not found in one of the "
-                    "handcrafted feature files:\n"
-                    f"{sequence}"
-                )
-
-            feature = np.asarray(
-                feature_dict[sequence],
-                dtype=np.float32,
-            ).ravel()
-
-            features.append(feature)
-
-        return features
-
-    # ========================================================
-    # 6. BUILD FEATURES FOR ONE SEQUENCE
-    # ========================================================
-
-    def get_features(
-        self,
-        sequence,
-        embedding_sources,
-        pooling="mean",
-    ):
-
-        """
         Build the complete feature vector for one sequence.
 
         Features consist of:
 
             Selected embeddings
+
                     +
+
             Optional physicochemical features
+
                     +
+
             Optional BLOSUM62 features
+
                     +
+
             Optional sinusoidal features
 
         All features are concatenated.
 
         Example
+
         -------
 
         embedding_sources=["prott5"]
@@ -438,156 +345,40 @@ class StackingRegressionPipeline:
         embedding_sources=["fusion"]
 
             Fusion embedding + optional handcrafted features
-        """
 
+        """
         if not embedding_sources:
-
-            raise ValueError(
-                "embedding_sources cannot be empty."
-            )
-
+            raise ValueError("embedding_sources cannot be empty.")
         features = []
-
-        # ----------------------------------------------------
-        # Embedding features
-        # ----------------------------------------------------
-
         for source in embedding_sources:
-
             feature = self.get_embedding(
-                sequence=sequence,
-                source=source,
-                pooling=pooling,
+                sequence=sequence, source=source, pooling=pooling
             )
-
             features.append(feature)
-
-        # ----------------------------------------------------
-        # Handcrafted features
-        # ----------------------------------------------------
-
-        features.extend(
-            self.get_extra_features(sequence)
-        )
-
+        features.extend(self.get_extra_features(sequence))
         if not features:
-
-            raise ValueError(
-                "No features were generated."
-            )
-
-        return np.concatenate(
-            features,
-            axis=0,
-        ).astype(np.float32)
-
-    # ========================================================
-    # 7. PREPARE DATASET SPLIT
-    # ========================================================
-
-    def prepare_split(
-        self,
-        dataset_split,
-        embedding_sources,
-        pooling="mean",
-    ):
-
-        """
-        Convert a DataFrame into X and y.
-
-        Required columns:
-
-            sequence
-            value
-        """
-        
-        print(f"The embeddings sources are: {embedding_sources}")
-
-        if not isinstance(
-            dataset_split,
-            pd.DataFrame,
-        ):
-
-            raise TypeError(
-                "dataset_split must be a pandas DataFrame."
-            )
-
-        required_columns = {
-            "sequence",
-            "value",
-        }
-
-        missing_columns = (
-            required_columns
-            - set(dataset_split.columns)
-        )
-
-        if missing_columns:
-
-            raise ValueError(
-                "Missing required columns: "
-                f"{sorted(missing_columns)}"
-            )
-
-        X_list = []
-        y_list = []
-
-        for row in dataset_split.itertuples(
-            index=False
-        ):
-
-            sequence = str(row.sequence)
-
-            feature = self.get_features(
-                sequence=sequence,
-                embedding_sources=embedding_sources,
-                pooling=pooling,
-            )
-
-            X_list.append(feature)
-            y_list.append(
-                float(row.value)
-            )
-
-        if not X_list:
-
-            raise ValueError(
-                "Dataset split is empty."
-            )
-
-        X = np.asarray(
-            X_list,
-            dtype=np.float32,
-        )
-
-        y = np.asarray(
-            y_list,
-            dtype=np.float32,
-        )
-
-        print(
-            f"Feature matrix shape: {X.shape}"
-        )
-
-        return X, y
-
-    # ========================================================
-    # 8. BUILD STACKING ENSEMBLE
-    # ========================================================
+            raise ValueError("No features were generated.")
+        return np.concatenate(features, axis=0).astype(np.float32)
 
     def build_stacking_ensemble(self):
-
         """
+
         Build stacking regression ensemble.
 
         Base estimators:
 
             1. Ridge
+
             2. SVR
+
             3. Extra Trees
+
             4. HistGradientBoosting
+
             5. KNN
+
             6. MLP
+
             7. XGBoost
 
         Meta learner:
@@ -595,68 +386,26 @@ class StackingRegressionPipeline:
             RidgeCV
 
         Scaling is performed inside the estimators that
+
         require it.
+
         """
-
         base_estimators = [
-
-            # ------------------------------------------------
-            # Ridge
-            # ------------------------------------------------
-
-            (
-                "ridge",
-
-                Pipeline(
-                    [
-                        (
-                            "scaler",
-                            StandardScaler(),
-                        ),
-
-                        (
-                            "model",
-                            Ridge(
-                                alpha=10.0,
-                            ),
-                        ),
-                    ]
-                ),
-            ),
-
-            # ------------------------------------------------
-            # SVR
-            # ------------------------------------------------
-
+            # (
+            #     "ridge",
+            #     Pipeline([("scaler", StandardScaler()), ("model", Ridge(alpha=10.0))]),
+            # ),
             (
                 "svr",
-
                 Pipeline(
                     [
-                        (
-                            "scaler",
-                            StandardScaler(),
-                        ),
-
-                        (
-                            "model",
-                            SVR(
-                                C=10.0,
-                                epsilon=0.1,
-                                kernel="rbf",
-                            ),
-                        ),
+                        ("scaler", StandardScaler()),
+                        ("model", SVR(C=10.0, epsilon=0.1, kernel="rbf")),
                     ]
                 ),
             ),
-
-            # ------------------------------------------------
-            # Extra Trees
-            # ------------------------------------------------
-
             (
                 "extra_trees",
-
                 ExtraTreesRegressor(
                     n_estimators=150,
                     max_depth=16,
@@ -664,35 +413,17 @@ class StackingRegressionPipeline:
                     n_jobs=-1,
                 ),
             ),
-
-            # ------------------------------------------------
-            # HistGradientBoosting
-            # ------------------------------------------------
-
             (
                 "hist_gb",
-
                 HistGradientBoostingRegressor(
-                    max_iter=150,
-                    l2_regularization=1.0,
-                    random_state=self.random_state,
+                    max_iter=150, l2_regularization=1.0, random_state=self.random_state
                 ),
             ),
-
-            # ------------------------------------------------
-            # KNN
-            # ------------------------------------------------
-
             (
                 "knn",
-
                 Pipeline(
                     [
-                        (
-                            "scaler",
-                            StandardScaler(),
-                        ),
-
+                        ("scaler", StandardScaler()),
                         (
                             "model",
                             KNeighborsRegressor(
@@ -705,28 +436,15 @@ class StackingRegressionPipeline:
                     ]
                 ),
             ),
-
-            # ------------------------------------------------
-            # MLP
-            # ------------------------------------------------
-
             (
                 "mlp",
-
                 Pipeline(
                     [
-                        (
-                            "scaler",
-                            StandardScaler(),
-                        ),
-
+                        ("scaler", StandardScaler()),
                         (
                             "model",
                             MLPRegressor(
-                                hidden_layer_sizes=(
-                                    128,
-                                    64,
-                                ),
+                                hidden_layer_sizes=(128, 64),
                                 activation="relu",
                                 alpha=0.01,
                                 max_iter=300,
@@ -737,52 +455,21 @@ class StackingRegressionPipeline:
                     ]
                 ),
             ),
-
-            # ------------------------------------------------
-            # XGBoost
-            # ------------------------------------------------
-
-            (
-                "xgb",
-
-                XGBRegressor(
-                    n_estimators=150,
-                    max_depth=5,
-                    learning_rate=0.05,
-                    subsample=0.8,
-                    colsample_bytree=0.8,
-                    random_state=self.random_state,
-                    n_jobs=-1,
-                ),
-            ),
+            # (
+            #     "xgb",
+            #     XGBRegressor(
+            #         n_estimators=150,
+            #         max_depth=5,
+            #         learning_rate=0.05,
+            #         subsample=0.8,
+            #         colsample_bytree=0.8,
+            #         random_state=self.random_state,
+            #         n_jobs=-1,
+            #     ),
+            # ),
         ]
-
-        # ====================================================
-        # Meta learner
-        # ====================================================
-
-        meta_learner = RidgeCV(
-            alphas=np.logspace(
-                -3,
-                3,
-                15,
-            )
-        )
-
-        # ====================================================
-        # Internal stacking CV
-        # ====================================================
-
-        internal_cv = KFold(
-            n_splits=5,
-            shuffle=True,
-            random_state=self.random_state,
-        )
-
-        # ====================================================
-        # Stacking model
-        # ====================================================
-
+        meta_learner = RidgeCV(alphas=np.logspace(-3, 3, 15))
+        internal_cv = KFold(n_splits=5, shuffle=True, random_state=self.random_state)
         return StackingRegressor(
             estimators=base_estimators,
             final_estimator=meta_learner,
@@ -790,894 +477,371 @@ class StackingRegressionPipeline:
             n_jobs=-1,
         )
 
-    # ========================================================
-    # 9. RUN FIVE-FOLD EVALUATION
-    # ========================================================
-
     def run_stacking_pipeline(
-        self,
-        dataset_csv,
-        metric_evaluator: Metric,
-        embedding_sources,
-        pooling="mean",
+        self, dataset_csv, metric_evaluator: Metric, embedding_sources, pooling="mean"
     ):
-
         """
-        Run five-fold evaluation with a fixed independent
+
+        Evaluation protocol:
+
+        1. Perform outer five-fold cross-validation on the
+
+        development dataset only.
+
+        2. Within each outer training fold, StackingRegressor
+
+        performs internal five-fold cross-validation to generate
+
+        out-of-fold predictions for training the meta-learner.
+
+        3. The fixed independent test set is not evaluated during
+
+        outer cross-validation.
+
+        4. After outer CV is completed, train a new stacking model
+
+        using the complete development dataset.
+
+        5. Evaluate the final model exactly once on the independent
+
         test set.
 
-        Dataset design:
-
-            Development = 4,074
-            Fixed test = 719
-
-        Outer CV:
-
-            Fold 1:
-                Train = 4 development folds
-                Validation = 1 development fold
-                Test = fixed 719
-
-            ...
-
-            Fold 5:
-                Train = 4 development folds
-                Validation = 1 development fold
-                Test = fixed 719
-
-        The fixed test set is never used during model fitting
-        or validation.
         """
-
-        # ----------------------------------------------------
-        # Check dataset
-        # ----------------------------------------------------
-
         if not os.path.exists(dataset_csv):
-
-            raise FileNotFoundError(
-                f"Dataset CSV not found: "
-                f"{dataset_csv}"
-            )
-
+            raise FileNotFoundError(f"Dataset CSV not found: {dataset_csv}")
         if not embedding_sources:
-
-            raise ValueError(
-                "embedding_sources cannot be empty."
-            )
-
-        # ----------------------------------------------------
-        # Verify requested embedding sources
-        # ----------------------------------------------------
-
+            raise ValueError("embedding_sources cannot be empty.")
         missing_sources = [
-            source
-            for source in embedding_sources
-            if source not in self.embeddings
+            source for source in embedding_sources if source not in self.embeddings
         ]
-
         if missing_sources:
-
             raise ValueError(
-                "Requested embedding sources are not loaded: "
-                f"{missing_sources}\n"
-                f"Available: {list(self.embeddings.keys())}"
+                f"Requested embedding sources are not loaded: {missing_sources}\nAvailable: {list(self.embeddings.keys())}"
             )
-
         print("\n" + "=" * 70)
         print("EXPERIMENT CONFIGURATION")
         print("=" * 70)
-
-        print(
-            f"Embedding sources: "
-            f"{embedding_sources}"
-        )
-
-        print(
-            f"Pooling: {pooling}"
-        )
-
+        print(f"Embedding sources: {embedding_sources}")
+        print(f"Pooling: {pooling}")
         print("=" * 70)
-
-        val_metrics = []
-        test_metrics = []
+        validation_metrics = []
         fold_results = []
-
-        fixed_test_sequences = None
-
-        # ====================================================
-        # Outer five-fold CV
-        # ====================================================
-
+        development_dataset = None
+        independent_test = None
+        development_sequences = None
+        independent_sequences = None
         for fold_number in range(1, 6):
-
             print("\n" + "=" * 70)
-            print(
-                f"FOLD {fold_number}/5"
-            )
+            print(f"OUTER FOLD {fold_number}/5")
             print("=" * 70)
-
-            # ------------------------------------------------
-            # Get split
-            # ------------------------------------------------
-
-            train_set, val_set, test_set = (
-                data_util.get_cv_split(
-                    input_csv_path=dataset_csv,
-                    fold=fold_number,
+            train_set, val_set, test_set = data_util.get_cv_split(
+                input_csv_path=dataset_csv, fold=fold_number
+            )
+            train_set = train_set.copy().reset_index(drop=True)
+            val_set = val_set.copy().reset_index(drop=True)
+            test_set = test_set.copy().reset_index(drop=True)
+            print(f"Training   : {len(train_set)}")
+            print(f"Validation : {len(val_set)}")
+            if fold_number == 1:
+                development_dataset = pd.concat([train_set, val_set], ignore_index=True)
+                independent_test = test_set.copy()
+                development_sequences = set(
+                    development_dataset["sequence"].astype(str).tolist()
                 )
-            )
-
-            print(
-                f"Train      : {len(train_set)}"
-            )
-
-            print(
-                f"Validation : {len(val_set)}"
-            )
-
-            print(
-                f"Fixed Test : {len(test_set)}"
-            )
-
-            # ------------------------------------------------
-            # Verify fixed test set
-            # ------------------------------------------------
-
-            test_sequences = (
-                test_set["sequence"]
-                .astype(str)
-                .tolist()
-            )
-
-            if fixed_test_sequences is None:
-
-                fixed_test_sequences = (
-                    test_sequences.copy()
+                independent_sequences = set(
+                    independent_test["sequence"].astype(str).tolist()
                 )
-
-            elif sorted(test_sequences) != sorted(
-                fixed_test_sequences
-            ):
-
+                overlap = development_sequences & independent_sequences
+                if overlap:
+                    raise ValueError(
+                        f"Data leakage detected: {len(overlap)} sequences occur in both development and independent-test datasets."
+                    )
+                print(
+                    "\nNo exact sequence overlap detected between development and independent-test datasets."
+                )
+                print(f"Complete development dataset : {len(development_dataset)}")
+                print(f"Independent test dataset     : {len(independent_test)}")
+            current_test_sequences = set(test_set["sequence"].astype(str).tolist())
+            if current_test_sequences != independent_sequences:
                 raise ValueError(
-                    "Fixed test set changed across folds. "
-                    f"Mismatch detected at fold "
-                    f"{fold_number}."
+                    f"Independent test set changed across outer folds. Mismatch detected at fold {fold_number}."
                 )
-
-            # ------------------------------------------------
-            # Prepare features
-            # ------------------------------------------------
-
             print("\nPreparing training features...")
-
             X_train, y_train = self.prepare_split(
-                train_set,
-                embedding_sources=embedding_sources,
-                pooling=pooling,
+                train_set, embedding_sources=embedding_sources, pooling=pooling
             )
-
             print("Preparing validation features...")
-
             X_val, y_val = self.prepare_split(
-                val_set,
-                embedding_sources=embedding_sources,
-                pooling=pooling,
+                val_set, embedding_sources=embedding_sources, pooling=pooling
             )
-
-            print("Preparing fixed-test features...")
-
-            X_test, y_test = self.prepare_split(
-                test_set,
-                embedding_sources=embedding_sources,
-                pooling=pooling,
-            )
-
-            # ------------------------------------------------
-            # Verify dimensions
-            # ------------------------------------------------
-
-            feature_dim = X_train.shape[1]
-
-            if X_val.shape[1] != feature_dim:
-
+            if X_train.shape[1] != X_val.shape[1]:
                 raise ValueError(
-                    "Training and validation feature "
-                    "dimensions do not match."
+                    "Training and validation feature dimensions do not match."
                 )
-
-            if X_test.shape[1] != feature_dim:
-
-                raise ValueError(
-                    "Training and test feature "
-                    "dimensions do not match."
-                )
-
-            print(
-                f"\nFinal feature dimension: "
-                f"{feature_dim}"
-            )
-
-            # ------------------------------------------------
-            # Build model
-            # ------------------------------------------------
-
-            model = (
-                self.build_stacking_ensemble()
-            )
-
-            # ------------------------------------------------
-            # Train
-            # ------------------------------------------------
-
-            print(
-                "\nTraining stacking ensemble..."
-            )
-
-            model.fit(
-                X_train,
-                y_train,
-            )
-
-            # ------------------------------------------------
-            # Predictions
-            # ------------------------------------------------
-
-            val_pred = model.predict(
-                X_val
-            )
-
-            test_pred = model.predict(
-                X_test
-            )
-
-            # ------------------------------------------------
-            # Flatten
-            # ------------------------------------------------
-
-            y_val = np.asarray(
-                y_val,
-                dtype=np.float64,
-            ).reshape(-1)
-
-            y_test = np.asarray(
-                y_test,
-                dtype=np.float64,
-            ).reshape(-1)
-
-            val_pred = np.asarray(
-                val_pred,
-                dtype=np.float64,
-            ).reshape(-1)
-
-            test_pred = np.asarray(
-                test_pred,
-                dtype=np.float64,
-            ).reshape(-1)
-
-            # ------------------------------------------------
-            # Prediction length checks
-            # ------------------------------------------------
-
+            print(f"\nFeature dimension: {X_train.shape[1]}")
+            model = self.build_stacking_ensemble()
+            print("\nTraining stacking ensemble...")
+            model.fit(X_train, y_train)
+            print("Training completed.")
+            val_pred = model.predict(X_val)
+            y_val = np.asarray(y_val, dtype=np.float64).reshape(-1)
+            val_pred = np.asarray(val_pred, dtype=np.float64).reshape(-1)
             if len(y_val) != len(val_pred):
-
-                raise ValueError(
-                    "Validation target/prediction "
-                    "length mismatch."
-                )
-
-            if len(y_test) != len(test_pred):
-
-                raise ValueError(
-                    "Test target/prediction "
-                    "length mismatch."
-                )
-
-            # ------------------------------------------------
-            # Metrics
-            # ------------------------------------------------
-
-            val_metric = (
-                metric_evaluator.compute_metrics(
-                    y_val,
-                    val_pred,
-                )
-            )
-
-            test_metric = (
-                metric_evaluator.compute_metrics(
-                    y_test,
-                    test_pred,
-                )
-            )
-
-            val_metrics.append(
-                val_metric
-            )
-
-            test_metrics.append(
-                test_metric
-            )
-
-            # =================================================
-            # Print validation
-            # =================================================
-
-            print(
-                f"\nFold {fold_number} Validation:"
-            )
-
-            self.print_metrics(
-                val_metric
-            )
-
-            # =================================================
-            # Print fixed test
-            # =================================================
-
-            print(
-                f"\nFold {fold_number} Fixed Test:"
-            )
-
-            self.print_metrics(
-                test_metric
-            )
-
-            # =================================================
-            # Analyze meta learner
-            # =================================================
-
-            stacking_weights = (
-                self.analyze_stacking_weights(
-                    model,
-                    fold_number,
-                )
-            )
-
-            # =================================================
-            # Store fold results
-            # =================================================
-
+                raise ValueError("Validation target/prediction length mismatch.")
+            val_metric = metric_evaluator.compute_metrics(y_val, val_pred)
+            validation_metrics.append(val_metric)
+            print(f"\nFold {fold_number} Validation Results:")
+            self.print_metrics(val_metric)
+            stacking_weights = self.analyze_stacking_weights(model, fold_number)
             fold_results.append(
                 {
                     "fold": fold_number,
-
                     "val_y_true": y_val,
                     "val_y_pred": val_pred,
-
-                    "test_y_true": y_test,
-                    "test_y_pred": test_pred,
-
-                    "stacking_weights":
-                        stacking_weights,
-
-                    "model": model,
+                    "stacking_weights": stacking_weights,
                 }
             )
-
-        # ====================================================
-        # Final summary
-        # ====================================================
-
-        print("\n")
+        print("\n" + "=" * 70)
+        print("FINAL 5-FOLD CROSS-VALIDATION SUMMARY")
         print("=" * 70)
-        print(
-            "FINAL 5-FOLD SUMMARY — FIXED TEST SET"
-        )
+        validation_summary = self.summarize_metrics(validation_metrics)
+        print("\nValidation performance (mean +/- SD):")
+        print(validation_summary.to_string(index=False))
+        print("\n" + "=" * 70)
+        print("TRAINING FINAL MODEL ON COMPLETE DEVELOPMENT DATASET")
         print("=" * 70)
-
-        summary_df = (
-            self.summarize_metrics(
-                test_metrics
-            )
+        X_full, y_full = self.prepare_split(
+            development_dataset, embedding_sources=embedding_sources, pooling=pooling
         )
-
-        print(
-            summary_df.to_string(
-                index=False
-            )
+        print(f"\nComplete development feature matrix: {X_full.shape}")
+        final_model = self.build_stacking_ensemble()
+        final_model.fit(X_full, y_full)
+        print("Final model training completed.")
+        final_stacking_weights = self.analyze_stacking_weights(final_model, "FINAL")
+        print("\n" + "=" * 70)
+        print("FINAL INDEPENDENT TEST EVALUATION")
+        print("=" * 70)
+        X_test, y_test = self.prepare_split(
+            independent_test, embedding_sources=embedding_sources, pooling=pooling
         )
-
-        # ====================================================
-        # Return results
-        # ====================================================
-
+        if X_full.shape[1] != X_test.shape[1]:
+            raise ValueError(
+                "Development and independent-test feature dimensions do not match."
+            )
+        test_pred = final_model.predict(X_test)
+        y_test = np.asarray(y_test, dtype=np.float64).reshape(-1)
+        test_pred = np.asarray(test_pred, dtype=np.float64).reshape(-1)
+        if len(y_test) != len(test_pred):
+            raise ValueError("Independent-test target/prediction length mismatch.")
+        independent_metric = metric_evaluator.compute_metrics(y_test, test_pred)
+        print("\nFINAL Independent Test Results:")
+        self.print_metrics(independent_metric)
         return {
-            "validation_metrics":
-                val_metrics,
-
-            "test_metrics":
-                test_metrics,
-
-            "summary":
-                summary_df,
-
-            "fold_results":
-                fold_results,
+            "validation_metrics": validation_metrics,
+            "validation_summary": validation_summary,
+            "fold_results": fold_results,
+            "final_model": final_model,
+            "final_stacking_weights": final_stacking_weights,
+            "independent_test_metric": independent_metric,
+            "independent_y_true": y_test,
+            "independent_y_pred": test_pred,
         }
-
-    # ========================================================
-    # 10. PRINT METRICS
-    # ========================================================
 
     @staticmethod
     def print_metrics(metrics):
-
         """
+
         Print regression metrics in a consistent order.
+
         """
-
-        ordered_keys = [
-            "Pearson_R",
-            "Spearman_R",
-            "Kendall_Tau",
-            "RMSE",
-            "MAE",
-            "R2",
-        ]
-
+        ordered_keys = ["Pearson_R", "Spearman_R", "Kendall_Tau", "RMSE", "MAE", "R2"]
         for key in ordered_keys:
-
             if key in metrics:
-
-                print(
-                    f"  {key:<15}: "
-                    f"{metrics[key]:.4f}"
-                )
-
-    # ========================================================
-    # 11. SUMMARIZE METRICS
-    # ========================================================
+                print(f"  {key:<15}: {metrics[key]:.4f}")
 
     @staticmethod
-    def summarize_metrics(
-        metrics_list,
-    ):
-
+    def summarize_metrics(metrics_list):
         """
+
         Calculate mean and sample standard deviation
+
         across the five outer folds.
+
         """
-
-        metric_names = [
-            "Pearson_R",
-            "Spearman_R",
-            "Kendall_Tau",
-            "RMSE",
-            "MAE",
-            "R2",
-        ]
-
+        metric_names = ["Pearson_R", "Spearman_R", "Kendall_Tau", "RMSE", "MAE", "R2"]
         rows = []
-
         for metric_name in metric_names:
-
             values = [
-                metric[metric_name]
-                for metric in metrics_list
-                if metric_name in metric
+                metric[metric_name] for metric in metrics_list if metric_name in metric
             ]
-
             if not values:
                 continue
-
             rows.append(
                 {
                     "Metric": metric_name,
-
-                    "Mean": np.mean(
-                        values
-                    ),
-
-                    "Std": np.std(
-                        values,
-                        ddof=1,
-                    ),
+                    "Mean": np.mean(values),
+                    "Std": np.std(values, ddof=1),
                 }
             )
-
         return pd.DataFrame(rows)
 
-    # ========================================================
-    # 12. ANALYZE STACKING WEIGHTS
-    # ========================================================
-
     @staticmethod
-    def analyze_stacking_weights(
-        stacking_model,
-        fold_idx,
-    ):
-
+    def analyze_stacking_weights(stacking_model, fold_idx):
         """
+
         Extract meta-learner coefficients.
 
         Coefficients represent the relationship between
+
         base-model predictions and the final RidgeCV
+
         prediction.
 
         Absolute coefficient magnitude should NOT be
+
         interpreted as direct predictive importance or
+
         percentage contribution.
+
         """
-
-        estimator_names = [
-            name
-            for name, _ in stacking_model.estimators
-        ]
-
-        meta_learner = (
-            stacking_model.final_estimator_
-        )
-
-        coefficients = np.asarray(
-            meta_learner.coef_
-        ).ravel()
-
-        if len(coefficients) != len(
-            estimator_names
-        ):
-
+        estimator_names = [name for name, _ in stacking_model.estimators]
+        meta_learner = stacking_model.final_estimator_
+        coefficients = np.asarray(meta_learner.coef_).ravel()
+        if len(coefficients) != len(estimator_names):
             raise ValueError(
-                "Number of meta-learner coefficients "
-                "does not match number of base "
-                "estimators."
+                "Number of meta-learner coefficients does not match number of base estimators."
             )
-
         weights_df = pd.DataFrame(
             {
-                "Base_Model":
-                    estimator_names,
-
-                "Coefficient":
-                    coefficients,
-
-                "Absolute_Weight":
-                    np.abs(coefficients),
+                "Base_Model": estimator_names,
+                "Coefficient": coefficients,
+                "Absolute_Weight": np.abs(coefficients),
             }
         )
-
-        total = (
-            weights_df["Absolute_Weight"]
-            .sum()
-        )
-
+        total = weights_df["Absolute_Weight"].sum()
         if total > 0:
-
-            weights_df[
-                "Coefficient_Abs_Percent"
-            ] = (
-                weights_df[
-                    "Absolute_Weight"
-                ]
-                / total
-                * 100
+            weights_df["Coefficient_Abs_Percent"] = (
+                weights_df["Absolute_Weight"] / total * 100
             )
-
         else:
-
-            weights_df[
-                "Coefficient_Abs_Percent"
-            ] = 0.0
-
-        weights_df = (
-            weights_df
-            .sort_values(
-                "Absolute_Weight",
-                ascending=False,
-            )
-            .reset_index(drop=True)
-        )
-
-        print(
-            f"\nMeta-learner weights — "
-            f"Fold {fold_idx}:"
-        )
-
-        print(
-            weights_df.to_string(
-                index=False
-            )
-        )
-
-        # ----------------------------------------------------
-        # Intercept
-        # ----------------------------------------------------
-
-        intercept = float(
-            np.asarray(
-                meta_learner.intercept_
-            ).ravel()[0]
-        )
-
-        print(
-            f"\nMeta learner intercept: "
-            f"{intercept:.4f}"
-        )
-
+            weights_df["Coefficient_Abs_Percent"] = 0.0
+        weights_df = weights_df.sort_values(
+            "Absolute_Weight", ascending=False
+        ).reset_index(drop=True)
+        print(f"\nMeta-learner weights — Fold {fold_idx}:")
+        print(weights_df.to_string(index=False))
+        intercept = float(np.asarray(meta_learner.intercept_).ravel()[0])
+        print(f"\nMeta learner intercept: {intercept:.4f}")
         return weights_df
 
-    # ========================================================
-    # 13. SAVE RESULTS
-    # ========================================================
-
     @staticmethod
-    def save_results(
-        results,
-        output_dir,
-        prefix="stacking",
-    ):
-
+    def save_results(results, output_dir, prefix="stacking"):
         """
+
         Save:
 
-            1. Summary metrics
-            2. Fold-level metrics
-            3. Meta-learner coefficients
+        1. Outer five-fold validation summary
+
+        2. Outer fold validation metrics
+
+        3. Final independent-test metrics
+
+        4. Final independent-test predictions
+
+        5. Outer-fold meta-learner coefficients
+
+        6. Final-model meta-learner coefficients
+
         """
-
-        os.makedirs(
-            output_dir,
-            exist_ok=True,
+        os.makedirs(output_dir, exist_ok=True)
+        validation_summary_file = os.path.join(
+            output_dir, f"{prefix}_validation_summary.csv"
         )
-
-        # ----------------------------------------------------
-        # Summary
-        # ----------------------------------------------------
-
-        summary_file = os.path.join(
-            output_dir,
-            f"{prefix}_summary.csv",
-        )
-
-        results[
-            "summary"
-        ].to_csv(
-            summary_file,
-            index=False,
-        )
-
-        # ----------------------------------------------------
-        # Fold metrics
-        # ----------------------------------------------------
-
-        fold_rows = []
-
-        for fold_idx, metrics in enumerate(
-            results["test_metrics"],
-            start=1,
-        ):
-
-            row = {
-                "Fold": fold_idx
-            }
-
+        results["validation_summary"].to_csv(validation_summary_file, index=False)
+        validation_rows = []
+        for fold_idx, metrics in enumerate(results["validation_metrics"], start=1):
+            row = {"Fold": fold_idx}
             row.update(metrics)
-
-            fold_rows.append(row)
-
-        fold_df = pd.DataFrame(
-            fold_rows
+            validation_rows.append(row)
+        validation_df = pd.DataFrame(validation_rows)
+        validation_file = os.path.join(
+            output_dir, f"{prefix}_validation_fold_metrics.csv"
         )
-
-        fold_file = os.path.join(
-            output_dir,
-            f"{prefix}_fold_metrics.csv",
+        validation_df.to_csv(validation_file, index=False)
+        independent_file = os.path.join(
+            output_dir, f"{prefix}_final_independent_test_metrics.csv"
         )
-
-        fold_df.to_csv(
-            fold_file,
-            index=False,
+        pd.DataFrame([results["independent_test_metric"]]).to_csv(
+            independent_file, index=False
         )
-
-        # ----------------------------------------------------
-        # Meta learner weights
-        # ----------------------------------------------------
-
+        prediction_file = os.path.join(
+            output_dir, f"{prefix}_final_independent_predictions.csv"
+        )
+        pd.DataFrame(
+            {
+                "y_true": results["independent_y_true"],
+                "y_pred": results["independent_y_pred"],
+            }
+        ).to_csv(prediction_file, index=False)
         weight_rows = []
-
-        for fold_result in results[
-            "fold_results"
-        ]:
-
-            fold_idx = fold_result[
-                "fold"
-            ]
-
-            weights_df = (
-                fold_result[
-                    "stacking_weights"
-                ]
-                .copy()
-            )
-
-            weights_df.insert(
-                0,
-                "Fold",
-                fold_idx,
-            )
-
-            weight_rows.append(
-                weights_df
-            )
-
+        for fold_result in results["fold_results"]:
+            weights_df = fold_result["stacking_weights"].copy()
+            weights_df.insert(0, "Fold", fold_result["fold"])
+            weight_rows.append(weights_df)
         if weight_rows:
-
-            all_weights_df = pd.concat(
-                weight_rows,
-                ignore_index=True,
-            )
-
-            weights_file = os.path.join(
-                output_dir,
-                f"{prefix}_meta_weights.csv",
-            )
-
-            all_weights_df.to_csv(
-                weights_file,
-                index=False,
-            )
-
-            print(
-                f"\nSaved meta weights: "
-                f"{weights_file}"
-            )
-
-        print(
-            f"\nSaved summary: "
-            f"{summary_file}"
+            all_weights_df = pd.concat(weight_rows, ignore_index=True)
+            weights_file = os.path.join(output_dir, f"{prefix}_cv_meta_weights.csv")
+            all_weights_df.to_csv(weights_file, index=False)
+            print(f"Saved CV meta weights: {weights_file}")
+        final_weights_file = os.path.join(
+            output_dir, f"{prefix}_final_meta_weights.csv"
         )
+        results["final_stacking_weights"].to_csv(final_weights_file, index=False)
+        print(f"\nSaved validation summary: {validation_summary_file}")
+        print(f"Saved validation fold metrics: {validation_file}")
+        print(f"Saved final independent metrics: {independent_file}")
+        print(f"Saved final independent predictions: {prediction_file}")
+        print(f"Saved final meta weights: {final_weights_file}")
 
-        print(
-            f"Saved fold metrics: "
-            f"{fold_file}"
-        )
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 if __name__ == "__main__":
-
-    # ========================================================
-    # Dataset
-    # ========================================================
-
-    DATASET_CSV = (
-        "./data/ecoli_five_fold_dataset.csv"
-    )
-
-    # ========================================================
-    # Embedding files
-    #
-    # You can keep all available embeddings here.
-    # Only the ones listed in `embedding_sources` are used.
-    # ========================================================
-
+    DATASET_CSV = "./data/ecoli_five_fold_dataset.csv"
     EMBEDDING_FILES = {
-
-        "prott5":
-            "./data/prott5/"
-            "prot_t5_xl_uniref50_ecoli.npz",
-
-        "ft_prott5":
-            "./data/prott5/"
-            "ecoli_finetuned_prott5.npz",
-
-        "esm2":
-            "./data/esm2/"
-            "esm2_t33_650M_UR50D_1280_ecoli.npz",
-
-        # Uncomment when a pre-computed fusion
-        # embedding is available.
-        #
-        # "fusion":
-        #     "./data/fusion/"
-        #     "fused_embeddings.npz",
+        "prott5": "./data/prott5/prot_t5_xl_uniref50_ecoli.npz",
+        "ft_prott5": "./data/prott5/ecoli_finetuned_prott5.npz",
+        "esm2": "./data/esm2/esm2_t33_650M_UR50D_1280_ecoli.npz",
     }
+    EMBEDDING_SOURCES = ["prott5"]
 
-    # ========================================================
-    # Select experiment
-    # ========================================================
-    #
-    # Examples:
-    #
-    #   ["prott5"]
-    #
-    #   ["ft_prott5"]
-    #
-    #   ["esm2"]
-    #
-    #   ["prott5", "esm2"]
-    #
-    #   ["fusion"]
-    #
-    # ========================================================
+    # Explicit switches: paths alone never enable a feature.
+    USE_PHYSIO = True
+    USE_BLOSUM = True
+    USE_SINUSOIDAL = True
+    USE_PFEATURE = False
+    PFEATURE_PATH = "./data/ecoli_pfeatures.npy"
+    PHYSIO_PATH = "./data/ecoli_phyiochem.csv"
+    BLOSUM_PATH = "./data/ecoli_blosum62_features.csv"
+    SINU_PATH = "./data/ecoli_sinusoidal_encoding.csv"
 
-    EMBEDDING_SOURCES = [
-        "ft_prott5" #prott5
-    ]
-
-    # ========================================================
-    # Optional handcrafted features
-    #
-    # Set any path to None to disable that feature.
-    # ========================================================
-
-    PHYSIO_PATH = (
-        "./data/ecoli_phyiochem.csv"
-    )
-
-    BLOSUM_PATH = (
-        "./data/ecoli_blosum62_features.csv"
-    )
-
-    SINU_PATH = (
-        "./data/ecoli_sinusoidal_encoding.csv"
-    )
-
-    # ========================================================
-    # Output
-    # ========================================================
-
-    EXPERIMENT_NAME = (
-        "Finetuned_ProtT5"
-    )
-
-    OUTPUT_PATH = (
-        f"./results/{EXPERIMENT_NAME}"
-    )
-
-    # ========================================================
-    # Create pipeline
-    # ========================================================
-
+    EXPERIMENT_NAME = "RIDGE_XG_BOOST_EXCLUDED"
+    OUTPUT_PATH = f"./results/{EXPERIMENT_NAME}"
     pipeline = StackingRegressionPipeline(
-
         embedding_files=EMBEDDING_FILES,
-
         physio_path=PHYSIO_PATH,
-
         blosum_path=BLOSUM_PATH,
-
         sinu_path=SINU_PATH,
-
         random_state=42,
+        pfeature_path=PFEATURE_PATH,
+        use_physio=USE_PHYSIO,
+        use_blosum=USE_BLOSUM,
+        use_sinusoidal=USE_SINUSOIDAL,
+        use_pfeature=USE_PFEATURE,
     )
-
-    # ========================================================
-    # Metric evaluator
-    # ========================================================
-
-    metric = Metric(
-        "RegressionMetrics"
-    )
-
-    # ========================================================
-    # Five-fold evaluation
-    # ========================================================
-
+    metric = Metric("RegressionMetrics")
     results = pipeline.run_stacking_pipeline(
-
         dataset_csv=DATASET_CSV,
-
         metric_evaluator=metric,
-
         embedding_sources=EMBEDDING_SOURCES,
-
         pooling="mean",
     )
-
-    # ========================================================
-    # Save results
-    # ========================================================
-
-    pipeline.save_results(
-
-        results,
-
-        output_dir=OUTPUT_PATH,
-
-        prefix="stacking",
-    )
+    pipeline.save_results(results, output_dir=OUTPUT_PATH, prefix="stacking")

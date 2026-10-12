@@ -820,7 +820,7 @@ def occurrences(string, sub_string):
     return count
 
 
-def CTC(filename,out):
+def CTC_old(filename,out):
     df = pd.DataFrame(columns=['Sequence','Triad:Frequency'])
     data=list((pd.read_csv(filename,sep=',',header=None)).iloc[:,0])
     for i in range(len(data)):
@@ -858,6 +858,182 @@ def CTC(filename,out):
         writer=csv.writer(file);
         writer.writerows(val2);
     return val2
+
+def CTC(filename, out):
+    """
+    Conjoint Triad Composition (CTC).
+
+    For sequences shorter than 3 residues, a triad cannot
+    be formed. In that case, preserve the sample and assign
+    zero to all 343 CTC descriptors.
+    """
+
+    # --------------------------------------------------------
+    # Read sequences
+    # --------------------------------------------------------
+
+    data = list(
+        pd.read_csv(
+            filename,
+            sep=",",
+            header=None,
+        ).iloc[:, 0]
+    )
+
+    # --------------------------------------------------------
+    # CTC feature names
+    #
+    # 7 amino-acid groups -> 7^3 = 343 triads
+    # --------------------------------------------------------
+
+    header = [
+        "CTC_" + str(triad)
+        for triad in LS
+    ]
+
+    rows = [
+        header
+    ]
+
+    # --------------------------------------------------------
+    # Process each sequence independently
+    # --------------------------------------------------------
+
+    for sequence in data:
+
+        sequence = (
+            str(sequence)
+            .strip()
+            .upper()
+        )
+
+        # ----------------------------------------------------
+        # Validate amino acids
+        # ----------------------------------------------------
+
+        allowed = set(
+            "ACDEFGHIKLMNPQRSTVWY"
+        )
+
+        invalid = (
+            set(sequence)
+            -
+            allowed
+        )
+
+        if invalid:
+
+            raise ValueError(
+                "Invalid residues detected in "
+                f"sequence '{sequence}': "
+                f"{sorted(invalid)}"
+            )
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        #
+        # CTC is based on 3-residue patterns.
+        # A sequence of length 1 or 2 cannot form a triad.
+        #
+        # Preserve fixed feature dimension by assigning
+        # zero to all 343 CTC descriptors.
+        # ----------------------------------------------------
+
+        if len(sequence) < 3:
+
+            rows.append(
+                [
+                    0.0
+                    for _ in LS
+                ]
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Convert amino acids into the seven CTC groups
+        # ----------------------------------------------------
+
+        encoded_sequence = (
+            repstring(
+                sequence
+            )
+        )
+
+        # ----------------------------------------------------
+        # Count each possible triad
+        # ----------------------------------------------------
+
+        counts = [
+            occurrences(
+                encoded_sequence,
+                triad,
+            )
+
+            for triad
+            in LS
+        ]
+
+        min_count = min(
+            counts
+        )
+
+        max_count = max(
+            counts
+        )
+
+        # ----------------------------------------------------
+        # Defensive fallback
+        # ----------------------------------------------------
+
+        if max_count == 0:
+
+            features = [
+                0.0
+                for _ in LS
+            ]
+
+        else:
+
+            features = [
+                round(
+                    (
+                        count -
+                        min_count
+                    )
+                    /
+                    max_count,
+                    3,
+                )
+
+                for count
+                in counts
+            ]
+
+        rows.append(
+            features
+        )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Always create ctc_output2
+    # --------------------------------------------------------
+
+    with open(
+        out,
+        "w",
+        newline="",
+    ) as file:
+
+        writer = csv.writer(
+            file
+        )
+
+        writer.writerows(
+            rows
+        )
+
+    return rows
 
 ######################################CETD###################################
 def ctd(file,out):
