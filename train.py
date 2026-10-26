@@ -823,25 +823,29 @@ if __name__ == "__main__":
     BLOSUM_PATH = "./data/ecoli_blosum62_features.csv"
     SINU_PATH = "./data/ecoli_sinusoidal_encoding.csv"
 
-    EXPERIMENT_NAME = "RIDGE_XG_BOOST_EXCLUDED"
-    OUTPUT_PATH = f"./results/{EXPERIMENT_NAME}"
-    pipeline = StackingRegressionPipeline(
-        embedding_files=EMBEDDING_FILES,
-        physio_path=PHYSIO_PATH,
-        blosum_path=BLOSUM_PATH,
-        sinu_path=SINU_PATH,
-        random_state=42,
-        pfeature_path=PFEATURE_PATH,
-        use_physio=USE_PHYSIO,
-        use_blosum=USE_BLOSUM,
-        use_sinusoidal=USE_SINUSOIDAL,
-        use_pfeature=USE_PFEATURE,
-    )
-    metric = Metric("RegressionMetrics")
-    results = pipeline.run_stacking_pipeline(
-        dataset_csv=DATASET_CSV,
-        metric_evaluator=metric,
-        embedding_sources=EMBEDDING_SOURCES,
-        pooling="mean",
-    )
-    pipeline.save_results(results, output_dir=OUTPUT_PATH, prefix="stacking")
+    EXPERIMENT_NAME = "PEPSTACK_ECOLI_RAND_SEED"
+    RAND_SEED = [42, 12, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    
+    for i in range(len(RAND_SEED)):
+        OUTPUT_PATH = f"./results/ecoli_random_seed/{EXPERIMENT_NAME}_{RAND_SEED[i]}"
+        
+        pipeline = StackingRegressionPipeline(
+            embedding_files=EMBEDDING_FILES,
+            physio_path=PHYSIO_PATH,
+            blosum_path=BLOSUM_PATH,
+            sinu_path=SINU_PATH,
+            random_state=RAND_SEED[i],
+            pfeature_path=PFEATURE_PATH,
+            use_physio=USE_PHYSIO,
+            use_blosum=USE_BLOSUM,
+            use_sinusoidal=USE_SINUSOIDAL,
+            use_pfeature=USE_PFEATURE,
+        )
+        metric = Metric("RegressionMetrics")
+        results = pipeline.run_stacking_pipeline(
+            dataset_csv=DATASET_CSV,
+            metric_evaluator=metric,
+            embedding_sources=EMBEDDING_SOURCES,
+            pooling="mean",
+        )
+        pipeline.save_results(results, output_dir=OUTPUT_PATH, prefix="stacking")

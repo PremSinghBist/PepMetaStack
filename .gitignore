@@ -8,3 +8,6 @@ model/
 results/
 fusion_result/
 
+#Logs
+logs/
+
