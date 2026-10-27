@@ -198,4 +198,12 @@ def main():
     print('\nPlotting complete. Error convention:',err_label)
 
 if __name__=='__main__':
+    '''
+    python plot_fusion_ablation.py \
+    --input-dir ./results/ecoli_fusion_ablation \
+    --output-dir ./results/ecoli_fusion_ablation/figures \
+    --formats png pdf \
+    --dpi 600
+    '''
+    
     main()

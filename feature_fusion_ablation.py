@@ -1189,6 +1189,9 @@ class StackingRegressionPipeline:
 
 
 if __name__ == "__main__":
+    '''
+    python -m pip install numpy pandas scipy scikit-learn xgboost torch
+    '''
     DATASET_CSV = "./data/ecoli_five_fold_dataset.csv"
     EMBEDDING_FILES = {
         "prott5": "./data/prott5/prot_t5_xl_uniref50_ecoli.npz",
