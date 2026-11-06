@@ -87,4 +87,10 @@ def main():
 
 
 if __name__ == "__main__":
+    '''
+    python species_dataset_stats.py \
+    --input ./results/bacterial_generalization_ablation/selected_five_species_aggregated.csv \
+    --output results/species_stats
+    
+    '''
     main()

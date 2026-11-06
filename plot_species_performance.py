@@ -30,7 +30,8 @@ METRICS = [
     ('Kendall_Tau', "Kendall's $\\tau$", True),
     ('RMSE', 'RMSE', False),
     ('MAE', 'MAE', False),
-    ('R2', '$R^2$', True),
+    ('R2', r'$\mathbf{R}^{\mathbf{2}}$', True), #Bold for math mode
+    # ('R2', '$R^2$', True),
 ]
 PALETTE = {'ProtT5': '#2474A6', 'ESM2': '#D66B43'}
 SPECIES = {
@@ -108,7 +109,8 @@ def make_figure(df: pd.DataFrame, output: Path, dpi: int = 600,
                         capsize=3.1, capthick=1.25, elinewidth=1.35,
                         color=PALETTE[emb], markeredgecolor='white',
                         markeredgewidth=.65, label=emb, zorder=3)
-        ax.set_title(f'{chr(65 + index)}  {label}', loc='left', weight='bold', pad=10)
+        # ax.set_title(f'{chr(65 + index)}  {label}', loc='left', weight='bold', pad=10)
+        ax.set_title(f'{label}', loc='left', weight='bold', pad=10)
         ax.set_ylabel(f'{label}  ({"higher" if higher_better else "lower"} is better)')
         ax.set_xticks(x)
         ax.set_xticklabels([SPECIES.get(s, s) for s in species],
